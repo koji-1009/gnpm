@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,8 +108,8 @@ func TestInstallEndToEnd(t *testing.T) {
 			t.Errorf("node_modules/%s missing: %v", name, err)
 		}
 	}
-	// bin shim for app.
-	if _, err := os.Stat(filepath.Join(root, "node_modules", ".bin", "app")); err != nil {
+	// bin shim for app (named app.cmd on Windows).
+	if _, err := os.Stat(filepath.Join(root, "node_modules", ".bin", binShimName("app"))); err != nil {
 		t.Errorf(".bin/app shim missing: %v", err)
 	}
 	// lockfile written with three packages.
@@ -243,6 +244,23 @@ func drainNodeDetect(op *Operation) {
 	}
 }
 
+// jsonStr escapes s for embedding inside a JSON string literal. Windows
+// temp paths contain backslashes, which are JSON (and JSON-string) escape
+// characters, so a raw path produces invalid package.json.
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1]) // strip the surrounding quotes
+}
+
+// binShimName is the .bin entry filename for this OS (Windows shims are
+// <name>.cmd / .ps1; elsewhere it is the bare name).
+func binShimName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".cmd"
+	}
+	return name
+}
+
 func newOp(t *testing.T, root string) *Operation {
 	t.Helper()
 	opts := DefaultOptions()
@@ -260,7 +278,7 @@ func TestInstallLinkDependency(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(localLib, "package.json"), []byte(`{"name":"local-lib","version":"1.0.0"}`), 0o644)
 
-	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"local-lib":"link:`+localLib+`"}}`)
+	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"local-lib":"link:`+jsonStr(localLib)+`"}}`)
 	if _, err := newOp(t, root).Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +372,7 @@ func TestInstallGitDependency(t *testing.T) {
 	root := t.TempDir()
 	home := t.TempDir() // isolate ~/.gnpm/git
 	t.Setenv("HOME", home)
-	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"gitdep":"git+file://`+repo+`"}}`)
+	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"gitdep":"git+file://`+jsonStr(repo)+`"}}`)
 
 	op := newOp(t, root)
 	if _, err := op.Run(context.Background()); err != nil {

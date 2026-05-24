@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -78,7 +79,9 @@ func TestExtract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	// Windows file modes carry no Unix exec bit, so the exec-bit check
+	// only applies elsewhere.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Error("bin/cli.js should be executable")
 	}
 }

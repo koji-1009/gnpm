@@ -1,0 +1,24 @@
+# Build output
+/gnpm
+/dist/
+/build/
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Local build/module caches (sandbox-writable, repo-local)
+/.gocache/
+/.gomodcache/
+
+# Benchmark/conformance fixtures: only package.json is tracked; installs
+# generate these and must never be committed.
+/tools/bench/fixtures/*/node_modules/
+/tools/bench/fixtures/*/package-lock.json
+/tools/bench/fixtures/*/pnpm-lock.yaml
+/tools/bench/fixtures/*/bun.lock
+/tools/bench/fixtures/*/bun.lockb
+
+# Editor / OS
+.DS_Store

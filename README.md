@@ -102,19 +102,66 @@ gnpm is also younger and less battle-tested than pnpm across unusual registries,
 
 ## Benchmark
 
-Measured on macOS arm64, fixture `react@^18 + react-dom@^18 + vite@^5` (16 packages, incl. esbuild/rollup platform-native optional deps), against the real npm registry. Each tool ran with an isolated `HOME` so global stores were not shared. Warm = `node_modules` removed with the store + lockfile kept; relink timed with `hyperfine` at ms precision.
+`tools/bench/run.sh` measures cold + warm install time and peak memory across gnpm, pnpm, npm, and bun on a chosen fixture. Cold runs wipe each tool's global cache/store first; warm runs only clear `node_modules` (which also drops gnpm's `node_modules/.gnpm` workspace state, so gnpm relinks rather than short-circuiting). Each scenario runs N times and the table reports best / median / worst, so the network floor and the tail are both visible alongside the typical observation.
 
-| scenario | gnpm | pnpm | bun |
-|---|---|---|---|
-| cold (empty cache + network) | ~1.1 s / 82 MB | ~1.2 s / 389 MB | ~0.7 s / 146 MB |
-| warm relink | **8.0 ms ± 0.5** | 311.1 ms ± 2.3 | 9.2 ms ± 0.5 |
-| no-op (everything intact) | ~4 ms | — | — |
+```
+tools/bench/run.sh --fixture vite-react --tools gnpm,pnpm,npm,bun
+```
 
-gnpm's warm relink is ~39× faster than pnpm and edges out bun, at a fraction of the memory. Two things make the warm path fast: each package is materialized with a single recursive `clonefile(2)` on macOS (per-file hardlink elsewhere), and the host node version is cached by binary identity so only the first install pays the `node --version` fork+exec (profiling showed it was ~80% of warm time before caching). The no-op case short-circuits on the workspace-state fingerprint. Numbers belong to this set of versions (pnpm 11.2.2, bun 1.3.14, node 24).
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--fixture NAME` | `vite-react` | Any directory under `tools/bench/fixtures/` |
+| `--cold-runs N` | `15` | Cold-scenario repetitions (network-bound; observed spreads of ~5x argue against fewer) |
+| `--warm-runs N` | `20` | Warm-scenario repetitions (no network cost, so sampling more is free) |
+| `--runs N` | — | Shortcut that sets both `--cold-runs` and `--warm-runs` to `N` |
+| `--tools LIST` | `gnpm,pnpm` | Comma-separated subset of `gnpm,pnpm,npm,bun` |
+| `--gnpm-bin PATH` | (auto-build) | Reuse an existing gnpm binary instead of running `go build` |
 
-On the **cold** path the resolver streams each finalized package straight into a tarball-fetch pool while packument prefetch and resolution are still in flight, so download + ingest overlap the metadata fetches rather than running after them ([doc/pipelined-install.md](doc/pipelined-install.md)). This is the default (hoisted) path only — the greedy tree resolver never revises a placement, so a streamed version is final; the pubgrub-based isolated path keeps its sequential fetch. Measured effect: the tarball phase (~360 ms) folds under the metadata phase, dropping the combined network phase from ~1.6 s to ~1.1 s.
+Warm timings from `run.sh` come from `/usr/bin/time` (`real` at 0.01s resolution), which is too coarse for the sub-10 ms native tools — drive those through `hyperfine` when you need ms precision:
 
-Reproduce with the harness under [tools/bench](tools/bench): `tools/bench/run.sh --tools gnpm,pnpm,bun` prints cold/warm best/median/worst + peak memory (it builds gnpm if `--gnpm-bin` is not given). `/usr/bin/time` is too coarse for the sub-10 ms warm path, so drive warm through `hyperfine` (the script header has the exact invocation). `tools/bench/install_phases.sh <gnpm-bin> <fixture-dir>` runs with `GNPM_PROFILE=1` and prints the per-phase min/median/max (cold wall time is network-variance dominated; the phase view is the stable signal).
+```
+hyperfine --warmup 2 --runs 20 --prepare 'rm -rf node_modules' '<tool> install'
+```
+
+`tools/bench/install_phases.sh <gnpm-bin> <fixture-dir>` prints gnpm's per-phase min/median/max under `GNPM_PROFILE=1`. macOS and Linux are supported (`/usr/bin/time -lp` / `-v`).
+
+### Reference run
+
+One author run on **macOS arm64 (10 cores)**, fixture `vite-react` (16 packages: react + react-dom + vite with its transitive deps, including the esbuild/rollup platform-native optional deps), measured 2026-05-24.
+
+Pinned versions — these numbers are sensitive to each package manager's implementation language and release, so they belong to **this** set:
+
+| component | version |
+|-----------|---------|
+| Go (used to build gnpm) | 1.26.3 |
+| gnpm | HEAD of this branch |
+| pnpm | 11.2.2 |
+| npm | 11.12.1 |
+| bun | 1.3.14 |
+| node | 24.15.0 |
+
+| tool | scenario | best | center | worst | peak memory |
+|------|----------|------|--------|-------|-------------|
+| **gnpm** | cold | 1510 ms | 2320 ms | 7190 ms | **74 MB** |
+| **gnpm** | warm | **7.3 ms** | **8.2 ± 0.3 ms** | 8.9 ms | **8 MB** |
+| pnpm | cold | 1930 ms | 4070 ms | 7380 ms | 392 MB |
+| pnpm | warm | 283.8 ms | 287.1 ± 1.9 ms | 291.3 ms | 268 MB |
+| npm | cold | 8720 ms | 10860 ms | 17640 ms | 379 MB |
+| npm | warm | 244.6 ms | 250.1 ± 2.7 ms | 255.1 ms | 106 MB |
+| bun | cold | 1630 ms | 2480 ms | 5240 ms | 121 MB |
+| bun | warm | 8.2 ms | 9.0 ± 0.3 ms | 9.6 ms | 7 MB |
+
+- `best` = min over N runs (the floor when the network and host cooperate).
+- `center` = median for cold, hyperfine `mean ± σ` for warm.
+- `worst` = max over N runs (the tail; cold can spike several× on a network-noisy session — treat the bracket as that session's spread, not a confidence interval).
+- Cold time + peak memory from `tools/bench/run.sh --cold-runs 10`; warm time from `hyperfine --warmup 2 --runs 20`, each tool seeded against its own lockfile.
+- Peak memory is `/usr/bin/time -lp`'s `peak memory footprint`.
+
+gnpm's warm relink lands in bun's tier and is ~35× faster than pnpm/npm at a fraction of the memory: each package is materialized with one recursive `clonefile(2)` on macOS (per-file hardlink elsewhere), and the host node version is cached by binary identity so only the first install pays the `node --version` fork+exec. Cold is network-bound — resolve + link are single-digit ms — and gnpm pipelines it (resolution streams each finalized package into a tarball-fetch pool so download + ingest overlap the packument fetches; [doc/pipelined-install.md](doc/pipelined-install.md)), so the cold spread above is registry/CDN variance, not gnpm compute. Rerun in your own environment with current versions for an up-to-date picture.
+
+### Binary size
+
+`go build ./cmd/gnpm` produces a single static binary, ~10 MB (10,761,378 bytes on macOS arm64) with **no JavaScript runtime and no native dylib** — ECDSA verification is `crypto/ecdsa` and the syscalls go through `golang.org/x/sys`, all in-process Go. For comparison, npm and pnpm ship on top of (or bundle) a Node.js runtime, and bun's standalone binary bundles its JS engine.
 
 ## Development
 

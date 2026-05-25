@@ -99,6 +99,17 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 	// result is cached by node-binary identity, so only the first install
 	// on a host pays the ~40 ms fork+exec; later ones read the cache.
 	op.nodeVer = startNodeDetect(ctx, filepath.Join(op.cacheRoot(), "node-version.json"))
+	// Join that goroutine before returning on every path. It writes its
+	// disk cache from the background, so letting it outlive Run risks a
+	// write landing after the caller considers the install done (e.g. a
+	// partial cache file, or — in tests — a write racing t.TempDir cleanup
+	// and failing it with ENOTEMPTY). By the time Run returns, detection has
+	// almost always finished, so this join is effectively free.
+	defer func() {
+		if op.nodeVer != nil {
+			op.nodeVer()
+		}
+	}()
 
 	cfg, err := npmrc.Loader{ProjectDir: op.ProjectRoot}.Load()
 	if err != nil {

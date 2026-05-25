@@ -235,15 +235,6 @@ func TestInstallFrozenLockfileDivergence(t *testing.T) {
 
 // --- helpers ----------------------------------------------------------
 
-// drainNodeDetect blocks until the background node-version detection (which
-// writes node-version.json into the cache root) has finished, so it can't
-// race t.TempDir cleanup.
-func drainNodeDetect(op *Operation) {
-	if op.nodeVer != nil {
-		op.nodeVer()
-	}
-}
-
 // jsonStr escapes s for embedding inside a JSON string literal. Windows
 // temp paths contain backslashes, which are JSON (and JSON-string) escape
 // characters, so a raw path produces invalid package.json.
@@ -480,7 +471,6 @@ func TestInstallTransitiveGitLockedFastPath(t *testing.T) {
 	if _, err := op.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	drainNodeDetect(op) // let the async node-version cache write finish before cleanup
 	for _, n := range []string{"host", "gitdep", "leaf"} {
 		if _, err := os.Stat(filepath.Join(root, "node_modules", n, "package.json")); err != nil {
 			t.Fatalf("first install: node_modules/%s missing: %v", n, err)
@@ -500,7 +490,6 @@ func TestInstallTransitiveGitLockedFastPath(t *testing.T) {
 	if _, err := op.Run(context.Background()); err != nil {
 		t.Fatalf("frozen locked reinstall of a transitive git dep should succeed offline: %v", err)
 	}
-	drainNodeDetect(op)
 	for _, n := range []string{"host", "gitdep", "leaf"} {
 		if _, err := os.Stat(filepath.Join(root, "node_modules", n, "package.json")); err != nil {
 			t.Errorf("locked reinstall: node_modules/%s missing: %v", n, err)

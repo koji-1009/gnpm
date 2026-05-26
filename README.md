@@ -102,7 +102,7 @@ gnpm is also younger and less battle-tested than pnpm across unusual registries,
 
 ## Benchmark
 
-`tools/bench/run.sh` measures cold + warm install time and peak memory across gnpm, pnpm, npm, and bun on a chosen fixture. Cold runs wipe each tool's global cache/store first; warm runs only clear `node_modules` (which also drops gnpm's `node_modules/.gnpm` workspace state, so gnpm relinks rather than short-circuiting). Each scenario runs N times and the table reports best / median / worst, so the network floor and the tail are both visible alongside the typical observation.
+`tools/bench/run.sh` measures cold + warm install time and peak memory across gnpm, pnpm, npm, and bun on a chosen fixture. Every tool installs against its own throwaway cache (a redirected `HOME` under a temp dir, which isolates its whole cache — package store *and* packument metadata — so every tool is equally cold), so the run never touches your real caches and a wiped dir is a genuine cold start. Cold is run **interleaved** — one round installs every tool back-to-back in a shuffled order, repeated N times — because it is network-bound and the registry/CDN drifts minute-to-minute; measuring all of one tool and then all of the next would hand each tool a different network window and a misleading gap, so the tools share each window and the drift cancels across rounds (shuffling keeps any one tool from always going first). Warm only clears `node_modules` (which also drops gnpm's `node_modules/.gnpm` workspace state, so gnpm relinks rather than short-circuiting) and stays a per-tool block, since it never hits the network. Each scenario runs N times and the table reports best / median / worst, so the network floor and the tail are both visible alongside the typical observation.
 
 ```
 tools/bench/run.sh --fixture vite-react --tools gnpm,pnpm,npm,bun
@@ -127,7 +127,7 @@ hyperfine --warmup 2 --runs 20 --prepare 'rm -rf node_modules' '<tool> install'
 
 ### Reference run
 
-One author run on **macOS arm64 (10 cores)**, fixture `vite-react` (16 packages: react + react-dom + vite with its transitive deps, including the esbuild/rollup platform-native optional deps), measured 2026-05-24.
+One author run on **macOS arm64 (10 cores)**, fixture `vite-react` (16 packages: react + react-dom + vite with its transitive deps, including the esbuild/rollup platform-native optional deps). Cold re-measured 2026-05-26 with the interleaved methodology above (N=15); warm measured 2026-05-24 via hyperfine. Absolute cold times track that session's network and are not comparable across days — only the within-session ordering is.
 
 Pinned versions — these numbers are sensitive to each package manager's implementation language and release, so they belong to **this** set:
 
@@ -142,22 +142,22 @@ Pinned versions — these numbers are sensitive to each package manager's implem
 
 | tool | scenario | best | center | worst | peak memory |
 |------|----------|------|--------|-------|-------------|
-| **gnpm** | cold | 1510 ms | 2320 ms | 7190 ms | **74 MB** |
+| **gnpm** | cold | 810 ms | 1050 ms | 2060 ms | **73 MB** |
 | **gnpm** | warm | **7.3 ms** | **8.2 ± 0.3 ms** | 8.9 ms | **8 MB** |
-| pnpm | cold | 1930 ms | 4070 ms | 7380 ms | 392 MB |
+| pnpm | cold | 900 ms | 1070 ms | 1210 ms | 393 MB |
 | pnpm | warm | 283.8 ms | 287.1 ± 1.9 ms | 291.3 ms | 268 MB |
-| npm | cold | 8720 ms | 10860 ms | 17640 ms | 379 MB |
+| npm | cold | 3230 ms | 3470 ms | 7200 ms | 378 MB |
 | npm | warm | 244.6 ms | 250.1 ± 2.7 ms | 255.1 ms | 106 MB |
-| bun | cold | 1630 ms | 2480 ms | 5240 ms | 121 MB |
+| bun | cold | 540 ms | 680 ms | 1250 ms | 140 MB |
 | bun | warm | 8.2 ms | 9.0 ± 0.3 ms | 9.6 ms | 7 MB |
 
 - `best` = min over N runs (the floor when the network and host cooperate).
 - `center` = median for cold, hyperfine `mean ± σ` for warm.
 - `worst` = max over N runs (the tail; cold can spike several× on a network-noisy session — treat the bracket as that session's spread, not a confidence interval).
-- Cold time + peak memory from `tools/bench/run.sh --cold-runs 10`; warm time from `hyperfine --warmup 2 --runs 20`, each tool seeded against its own lockfile.
+- Cold time + peak memory from `tools/bench/run.sh --cold-runs 15` (interleaved, shuffled order, each tool's whole cache isolated under a temp `HOME`); warm time from `hyperfine --warmup 2 --runs 20`, each tool seeded against its own lockfile.
 - Peak memory is `/usr/bin/time -lp`'s `peak memory footprint`.
 
-gnpm's warm relink lands in bun's tier and is ~35× faster than pnpm/npm at a fraction of the memory: each package is materialized with one recursive `clonefile(2)` on macOS (per-file hardlink elsewhere), and the host node version is cached by binary identity so only the first install pays the `node --version` fork+exec. Cold is network-bound — resolve + link are single-digit ms — and gnpm pipelines it (resolution streams each finalized package into a tarball-fetch pool so download + ingest overlap the packument fetches; [doc/pipelined-install.md](doc/pipelined-install.md)), so the cold spread above is registry/CDN variance, not gnpm compute. Rerun in your own environment with current versions for an up-to-date picture.
+gnpm's warm relink lands in bun's tier and is ~35× faster than pnpm/npm at a fraction of the memory: each package is materialized with one recursive `clonefile(2)` on macOS (per-file hardlink elsewhere), and the host node version is cached by binary identity so only the first install pays the `node --version` fork+exec. Cold is network-bound — resolve + link are single-digit ms — and gnpm pipelines it (resolution streams each finalized package into a tarball-fetch pool so download + ingest overlap the packument fetches; [doc/pipelined-install.md](doc/pipelined-install.md)), so the cold spread above is registry/CDN variance, not gnpm compute. On this interleaved, equally-cold footing the cold order is bun < gnpm ≈ pnpm < npm: gnpm and pnpm are a near tie (gnpm edges it on best/median here, pnpm has the tighter tail) and both lap npm, but bun leads cold. gnpm's standout numbers are the warm relink and the lowest peak memory in the table — not cold throughput. Rerun in your own environment with current versions for an up-to-date picture.
 
 ### Binary size
 

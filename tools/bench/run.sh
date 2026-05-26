@@ -2,10 +2,19 @@
 # Install-time benchmark for gnpm vs other package managers.
 #
 # Measures cold + warm install time and peak memory for a chosen
-# fixture across gnpm, pnpm, npm, bun. Cold runs wipe each tool's
-# global cache/store first; warm runs only clear node_modules (which
-# also drops gnpm's node_modules/.gnpm workspace state, so gnpm
-# actually relinks rather than short-circuiting).
+# fixture across gnpm, pnpm, npm, bun. Every tool installs against its
+# own fresh temp cache via a redirected HOME, which isolates each tool's
+# entire cache (package store + packument metadata), so the user's real
+# caches are never touched and a wiped dir is a true cold start. Cold
+# runs use an empty cache; warm runs reuse a seeded cache + lockfile and
+# only clear node_modules (which also drops gnpm's node_modules/.gnpm
+# workspace state, so gnpm relinks rather than short-circuiting).
+#
+# Cold is run INTERLEAVED (one round = every tool back-to-back in a
+# shuffled order, repeated) because it is network-bound and the CDN
+# drifts minute-to-minute; measuring each tool in its own block would
+# give tools different network windows and an unfair, non-reproducible
+# gap. Warm is local-only, so it stays a per-tool block.
 #
 # Defaults are asymmetric on purpose:
 #   - cold = 15 runs.  Network-bound; observed spreads of 5x are
@@ -97,36 +106,40 @@ repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture_dir="$repo_root/tools/bench/fixtures/$fixture"
 [ -d "$fixture_dir" ] || { echo "fixture not found: $fixture_dir" >&2; exit 64; }
 
+# One scratch root holds every tool's throwaway cache and the optional gnpm
+# build, so a single trap cleans up and the benchmark never touches the
+# user's real ~/.gnpm, pnpm, npm, or bun caches.
+bench_tmp="$(mktemp -d -t gnpm-bench.XXXXXX)"
+trap 'rm -rf "$bench_tmp"' EXIT
+
 # Build gnpm if no binary was supplied.
 if [ -z "$gnpm_bin" ]; then
-  build_dir="$(mktemp -d -t gnpm-bench.XXXXXX)"
-  trap 'rm -rf "$build_dir"' EXIT
   echo "building gnpm binary (one-time)..." >&2
-  (cd "$repo_root" && go build -o "$build_dir/gnpm" ./cmd/gnpm)
-  gnpm_bin="$build_dir/gnpm"
+  (cd "$repo_root" && go build -o "$bench_tmp/gnpm" ./cmd/gnpm)
+  gnpm_bin="$bench_tmp/gnpm"
 fi
 [ -x "$gnpm_bin" ] || { echo "gnpm binary not executable: $gnpm_bin" >&2; exit 1; }
+# Install commands run after `cd` into the fixture dir, so a relative
+# --gnpm-bin would no longer resolve — absolutize it now.
+case "$gnpm_bin" in
+  /*) ;;
+  *)  gnpm_bin="$(cd "$(dirname "$gnpm_bin")" && pwd)/$(basename "$gnpm_bin")" ;;
+esac
 
 # --- per-tool helpers --------------------------------------------------------
 
-clear_global_cache() {
-  case "$1" in
-    gnpm)
-      rm -rf "$HOME/.gnpm/cache" "$HOME/.gnpm/store"
-      ;;
-    pnpm)
-      rm -rf "$HOME/Library/pnpm/store" \
-             "$HOME/.local/share/pnpm/store" \
-             "$HOME/Library/Caches/pnpm" \
-             "$HOME/.cache/pnpm"
-      ;;
-    npm)
-      rm -rf "$HOME/.npm/_cacache"
-      ;;
-    bun)
-      rm -rf "$HOME/.bun/install/cache"
-      ;;
-  esac
+# Each tool installs against its own fresh temp cache under $bench_tmp, so the
+# user's real caches are never touched and a wiped dir is a genuine cold
+# start. We redirect HOME for every tool (gnpm ~/.gnpm, pnpm ~/Library/pnpm
+# + ~/Library/Caches/pnpm, npm ~/.npm, bun ~/.bun all live under $HOME), so a
+# single mechanism isolates each tool's *entire* cache — both the package
+# store and the packument metadata. (A pnpm-only `--store-dir` would leave its
+# metadata cache warm, making its cold unfairly fast versus the others.)
+tool_cache() { echo "$bench_tmp/cache-$1"; }
+
+reset_cache() {
+  rm -rf "$(tool_cache "$1")"
+  mkdir -p "$(tool_cache "$1")"
 }
 
 clear_project() {
@@ -147,13 +160,22 @@ tool_command() {
   esac
 }
 
-# Run one install, print "<seconds> <peak_bytes>".
+# Env prefix that points the tool's whole cache at its isolated temp HOME.
+tool_env() { echo "HOME=$(tool_cache "$1")"; }
+
+# Populate a tool's cache + lockfile without timing it (used to seed warm).
+seed_install() {
+  local cmd; cmd="$(tool_command "$1")"
+  (cd "$fixture_dir" && env $(tool_env "$1") $cmd >/dev/null 2>&1 || true)
+}
+
+# Run one timed install against the tool's isolated cache; print
+# "<seconds> <peak_bytes>".
 run_once() {
-  local cmd
+  local cmd stderr_log
   cmd="$(tool_command "$1")"
-  local stderr_log
-  stderr_log="$(mktemp)"
-  (cd "$fixture_dir" && /usr/bin/time $time_flag $cmd >/dev/null 2>"$stderr_log") \
+  stderr_log="$(mktemp "$bench_tmp/stderr.XXXXXX")"
+  (cd "$fixture_dir" && env $(tool_env "$1") /usr/bin/time $time_flag $cmd >/dev/null 2>"$stderr_log") \
     || { echo "install failed for $1:" >&2; cat "$stderr_log" >&2; rm -f "$stderr_log"; return 1; }
   local real peak
   real="$(parse_real < "$stderr_log")"
@@ -176,6 +198,19 @@ median() {
 min() { sort -n | head -1; }
 max() { sort -n | tail -1; }
 
+# Fisher-Yates shuffle of the positional args, one per line. Randomizing the
+# within-round order keeps any tool from always installing first (and e.g.
+# warming the DNS/TCP path for the rest). Uses $RANDOM, so it needs no
+# external `shuf`/`sort -R`.
+shuffle() {
+  local arr=("$@") i j tmp
+  for ((i=${#arr[@]}-1; i>0; i--)); do
+    j=$(( RANDOM % (i + 1) ))
+    tmp="${arr[i]}"; arr[i]="${arr[j]}"; arr[j]="$tmp"
+  done
+  printf '%s\n' "${arr[@]}"
+}
+
 format_ms() {
   # `%d` truncates to zero for sub-ms runs (gnpm/bun-warm hit this);
   # `%.1f` keeps a digit for small values without faking precision
@@ -189,42 +224,74 @@ format_ms() {
 format_mb() { awk -v b="$1" 'BEGIN {printf "%.1f MB", b / 1024 / 1024}'; }
 
 # --- main loop ---------------------------------------------------------------
+#
+# Resolve the requested tools to those actually installed.
+IFS=',' read -ra requested <<< "$tools_csv"
+tool_list=()
+for tool in "${requested[@]}"; do
+  if [ "$tool" != "gnpm" ] && ! command -v "$tool" >/dev/null 2>&1; then
+    echo "skipping $tool (not on PATH)" >&2
+    continue
+  fi
+  tool_list+=("$tool")
+done
+[ "${#tool_list[@]}" -gt 0 ] || { echo "no runnable tools" >&2; exit 1; }
 
-echo "## bench: $fixture (cold N=$cold_runs / warm N=$warm_runs)"
+samples="$bench_tmp/samples"
+mkdir -p "$samples"
+
+# Cold is network-bound and the registry/CDN drifts on a minute scale, so
+# measuring all of tool A then all of tool B lets each tool land in its own
+# (faster or slower) network window — an unfair, non-reproducible gap. Run
+# the tools INTERLEAVED instead: one round installs every tool back-to-back
+# (in a shuffled order, so no tool is always first), so the drift hits them
+# inside the same window and cancels across rounds.
+echo "cold: $cold_runs interleaved rounds over ${tool_list[*]}..." >&2
+for r in $(seq 1 "$cold_runs"); do
+  for tool in $(shuffle "${tool_list[@]}"); do
+    reset_cache "$tool"   # genuine cold: empty, isolated cache
+    clear_project
+    if read -r t p <<< "$(run_once "$tool")"; then
+      echo "$t $p" >> "$samples/cold-$tool.txt"
+    fi
+  done
+done
+
+# Warm hits the store + lockfile, not the network, so there is no window to
+# cancel — a per-tool block is fine. clear_project drops the lockfile, so
+# re-seed before each measurement to restore it (and warm the cache).
+echo "warm: $warm_runs runs per tool..." >&2
+for tool in "${tool_list[@]}"; do
+  reset_cache "$tool"
+  for _ in $(seq 1 "$warm_runs"); do
+    clear_project
+    if [ ! -d "$fixture_dir/node_modules" ]; then
+      seed_install "$tool"
+      rm -rf "$fixture_dir/node_modules"
+    fi
+    if read -r t p <<< "$(run_once "$tool")"; then
+      echo "$t $p" >> "$samples/warm-$tool.txt"
+    fi
+  done
+done
+
+# --- table -------------------------------------------------------------------
+
+echo "## bench: $fixture (cold N=$cold_runs interleaved / warm N=$warm_runs)"
 echo
 echo "| tool | scenario | best | median | worst | peak memory |"
 echo "|------|----------|------|--------|-------|-------------|"
-
-IFS=',' read -ra tool_list <<< "$tools_csv"
 for tool in "${tool_list[@]}"; do
-  if ! command -v "$tool" >/dev/null 2>&1 && [ "$tool" != "gnpm" ]; then
-    echo "| $tool | — | (not on PATH, skipped) | |"
-    continue
-  fi
   for scenario in cold warm; do
-    if [ "$scenario" = "cold" ]; then
-      n="$cold_runs"
-    else
-      n="$warm_runs"
+    f="$samples/$scenario-$tool.txt"
+    if [ ! -s "$f" ]; then
+      echo "| $tool | $scenario | (no samples) | | | |"
+      continue
     fi
-    times=() peaks=()
-    for _ in $(seq 1 "$n"); do
-      clear_project
-      [ "$scenario" = "cold" ] && clear_global_cache "$tool"
-      # warm scenarios need an established lockfile/cache from a
-      # prior run; do a single seed install when needed.
-      if [ "$scenario" = "warm" ] && [ ! -d "$fixture_dir/node_modules" ]; then
-        (cd "$fixture_dir" && $(tool_command "$tool") >/dev/null 2>&1 || true)
-        rm -rf "$fixture_dir/node_modules"
-      fi
-      read -r t p <<< "$(run_once "$tool")"
-      times+=("$t")
-      peaks+=("$p")
-    done
-    median_t=$(printf '%s\n' "${times[@]}" | median)
-    min_t=$(printf '%s\n' "${times[@]}" | min)
-    max_t=$(printf '%s\n' "${times[@]}" | max)
-    median_p=$(printf '%s\n' "${peaks[@]}" | median)
+    min_t=$(awk '{print $1}' "$f" | min)
+    median_t=$(awk '{print $1}' "$f" | median)
+    max_t=$(awk '{print $1}' "$f" | max)
+    median_p=$(awk '{print $2}' "$f" | median)
     echo "| $tool | $scenario | $(format_ms "$min_t") | $(format_ms "$median_t") | $(format_ms "$max_t") | $(format_mb "$median_p") |"
   done
 done

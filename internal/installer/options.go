@@ -11,6 +11,16 @@ import (
 	"github.com/koji-1009/gnpm/internal/signature"
 )
 
+// UnsetMinReleaseAge marks Options.MinReleaseAge as "not configured", so the
+// install falls back to the project mode's default minimum-release-age.
+const UnsetMinReleaseAge time.Duration = -1
+
+// PnpmDefaultMinReleaseAge mirrors pnpm's built-in default — its config
+// defaults set "minimum-release-age": 24*60 (minutes) — withholding releases
+// younger than one day as a supply-chain measure. gnpm matches it in pnpm mode
+// so a plain install is no less safe by default than pnpm.
+const PnpmDefaultMinReleaseAge = 24 * time.Hour
+
 // ScriptPolicy selects which install-time lifecycle scripts run.
 type ScriptPolicy int
 
@@ -33,6 +43,10 @@ type Options struct {
 	PreferOffline  bool
 	EngineStrict   bool
 
+	// MinReleaseAge is the minimum-release-age supply-chain gate (withhold
+	// versions younger than this). A negative value (UnsetMinReleaseAge)
+	// means "not configured" — the install then applies the project mode's
+	// default: pnpm's one-day gate in pnpm mode, none in npm mode.
 	MinReleaseAge time.Duration
 
 	// SignaturePolicy controls ECDSA tarball signature enforcement.
@@ -60,6 +74,7 @@ func DefaultOptions() Options {
 	return Options{
 		ScriptPolicy:            ScriptAllowlist,
 		OptimisticRepeatInstall: true,
+		MinReleaseAge:           UnsetMinReleaseAge,
 	}
 }
 

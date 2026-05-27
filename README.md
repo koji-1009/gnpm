@@ -166,13 +166,22 @@ gnpm's warm relink lands in bun's tier and is ~35× faster than pnpm/npm at a fr
 ## Development
 
 ```sh
-make build    # build the binary
-make test     # go test ./...
-make check    # gofmt + vet + test
+make build         # build the binary
+make test          # go test ./...
+make check         # gofmt + vet + test
+make conformance   # differential resolution check vs npm and pnpm
 ```
 
 Tests that bind a loopback HTTP server (registry/installer integration) need real
 localhost networking; run them outside a restrictive sandbox.
+
+`make conformance` runs npm, pnpm, and gnpm on the same fixtures and compares the
+resolved version set (name → versions) 1:1 against each reference; it exits nonzero
+if gnpm diverges (a version it resolves differently, or input one side accepts and the
+other rejects). It needs `npm`, `pnpm`, and network access, and must run outside a
+restrictive sandbox. Run a single fixture with `make conformance ARGS="--fixture lodash"`
+or point at a prebuilt binary with `ARGS="--gnpm-bin ./gnpm"`. The harness lives in
+[tools/conformance](tools/conformance/main.go).
 
 ## License
 

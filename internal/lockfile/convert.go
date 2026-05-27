@@ -69,7 +69,42 @@ func PnpmToLockfile(p *PnpmLockfile, registry string) *Lockfile {
 			Signatures:           signaturesFromPnpm(entry.Signatures),
 		}
 	}
-	return &Lockfile{Version: SchemaVersion, Importers: map[string]Importer{".": importer}, Packages: packages}
+	return &Lockfile{
+		Version:   SchemaVersion,
+		Importers: map[string]Importer{".": importer},
+		Packages:  packages,
+		Pnpm:      pnpmPassthrough(p),
+	}
+}
+
+// pnpmPassthrough captures the pnpm-lock.yaml content the internal model does
+// not represent so LockfileToPnpm can re-emit it. Snapshot-preserved fields are
+// keyed by base "name@version" to match the flat keys the writer regenerates.
+func pnpmPassthrough(p *PnpmLockfile) *PnpmPassthrough {
+	pt := &PnpmPassthrough{
+		LockfileVersion:   p.LockfileVersion,
+		Settings:          p.Settings,
+		TopLevel:          p.PreservedTopLevel,
+		PackagePreserved:  map[string]map[string]any{},
+		SnapshotPreserved: map[string]map[string]any{},
+		ImporterPreserved: map[string]map[string]any{},
+	}
+	for key, e := range p.Packages {
+		if len(e.Preserved) > 0 {
+			pt.PackagePreserved[key] = e.Preserved
+		}
+	}
+	for key, e := range p.Snapshots {
+		if len(e.Preserved) > 0 {
+			pt.SnapshotPreserved[stripPeerSuffix(key)] = e.Preserved
+		}
+	}
+	for path, i := range p.Importers {
+		if len(i.Preserved) > 0 {
+			pt.ImporterPreserved[path] = i.Preserved
+		}
+	}
+	return pt
 }
 
 // LockfileToPnpm converts the internal model into a pnpm-lock.yaml v9
@@ -123,7 +158,7 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 		}
 	}
 
-	return &PnpmLockfile{
+	out := &PnpmLockfile{
 		LockfileVersion: "9.0",
 		Settings:        map[string]any{"autoInstallPeers": true, "excludeLinksFromLockfile": false},
 		Importers:       map[string]PnpmImporter{".": importer},
@@ -131,6 +166,38 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 		Snapshots:       snapshots,
 		Catalogs:        map[string]map[string]string{},
 	}
+	// Re-emit the pnpm-only content captured on read (overrides,
+	// patchedDependencies, time, the original settings block, per-package
+	// fields like libc, …) so a round trip does not silently drop it. Only
+	// the original settings/version override the defaults above.
+	if pt := lock.Pnpm; pt != nil {
+		if pt.LockfileVersion != "" {
+			out.LockfileVersion = pt.LockfileVersion
+		}
+		if len(pt.Settings) > 0 {
+			out.Settings = pt.Settings
+		}
+		out.PreservedTopLevel = pt.TopLevel
+		for key, pres := range pt.PackagePreserved {
+			if e, ok := out.Packages[key]; ok {
+				e.Preserved = pres
+				out.Packages[key] = e
+			}
+		}
+		for key, pres := range pt.SnapshotPreserved {
+			if e, ok := out.Snapshots[key]; ok {
+				e.Preserved = pres
+				out.Snapshots[key] = e
+			}
+		}
+		for path, pres := range pt.ImporterPreserved {
+			if e, ok := out.Importers[path]; ok {
+				e.Preserved = pres
+				out.Importers[path] = e
+			}
+		}
+	}
+	return out
 }
 
 func parsePnpmID(key string) (name, version string, ok bool) {

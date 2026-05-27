@@ -101,6 +101,14 @@ func FromMap(m map[string]any) *PackageJSON {
 	}
 
 	p.Overrides, p.NestedOverrides = parseOverrides(m["overrides"])
+	// pnpm keeps overrides under `pnpm.overrides`; merge them over the
+	// npm-style top-level `overrides` (pnpm's location wins) so a pnpm
+	// project's overrides are honored, not silently ignored.
+	if pnpmSection, ok := m["pnpm"].(map[string]any); ok {
+		pf, pn := parseOverrides(pnpmSection["overrides"])
+		p.Overrides = MergeOverrides(p.Overrides, pf)
+		p.NestedOverrides = MergeNestedOverrides(p.NestedOverrides, pn)
+	}
 	p.Workspaces = parseWorkspaces(m["workspaces"])
 	p.OnlyBuiltDependencies = strList(m["onlyBuiltDependencies"])
 	p.PackageManager = stringField(m, "packageManager", "")
@@ -195,6 +203,46 @@ func parseOverrides(raw any) (map[string]string, map[string]map[string]string) {
 		}
 	}
 	return flat, nested
+}
+
+// MergeOverrides returns base with override's entries layered on top
+// (override wins on conflicting keys). Either map may be nil.
+func MergeOverrides(base, override map[string]string) map[string]string {
+	if len(override) == 0 {
+		return base
+	}
+	out := map[string]string{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range override {
+		out[k] = v
+	}
+	return out
+}
+
+// MergeNestedOverrides layers override's parent→child→range entries over
+// base (override wins on conflicting parent+child).
+func MergeNestedOverrides(base, override map[string]map[string]string) map[string]map[string]string {
+	if len(override) == 0 {
+		return base
+	}
+	out := map[string]map[string]string{}
+	for parent, m := range base {
+		out[parent] = map[string]string{}
+		for c, r := range m {
+			out[parent][c] = r
+		}
+	}
+	for parent, m := range override {
+		if out[parent] == nil {
+			out[parent] = map[string]string{}
+		}
+		for c, r := range m {
+			out[parent][c] = r
+		}
+	}
+	return out
 }
 
 func ensure(m map[string]map[string]string, k string) map[string]string {

@@ -186,6 +186,9 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// Overrides apply from package.json (npm `overrides` + pnpm `pnpm.overrides`)
+	// and pnpm-workspace.yaml `overrides`; the workspace (monorepo-wide) wins.
+	overrides, nestedOverrides := op.effectiveOverrides(pkg)
 
 	var (
 		linkSpecs      []linker.LinkSpec
@@ -226,8 +229,8 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		placements, treeWarnings, rerr := treeresolver.Resolve(treeresolver.Request{
 			Dependencies:       resolverDeps,
 			Provider:           provider,
-			Overrides:          pkg.Overrides,
-			NestedOverrides:    pkg.NestedOverrides,
+			Overrides:          overrides,
+			NestedOverrides:    nestedOverrides,
 			AutoInstallPeers:   true,
 			BlockExoticSubdeps: blockExotic,
 			TrustedExotic:      policy.IsTrustedExoticRepo,
@@ -289,8 +292,8 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		solver := resolver.NewSolver(resolver.Request{
 			Dependencies:     declared,
 			Provider:         provider,
-			Overrides:        pkg.Overrides,
-			NestedOverrides:  pkg.NestedOverrides,
+			Overrides:        overrides,
+			NestedOverrides:  nestedOverrides,
 			Preferred:        op.preferred(existing),
 			AutoInstallPeers: true,
 		})
@@ -649,6 +652,16 @@ func (op *Operation) scriptsEnabled() bool {
 
 func (op *Operation) EffectiveScriptPolicyOK() bool {
 	return op.Options.EffectiveScriptPolicy() != ScriptNone
+}
+
+// effectiveOverrides merges dependency overrides from package.json (npm
+// `overrides` and pnpm `pnpm.overrides`, already folded into pkg) with
+// pnpm-workspace.yaml `overrides`. The workspace is monorepo-wide policy, so
+// it wins on conflicts.
+func (op *Operation) effectiveOverrides(pkg *project.PackageJSON) (map[string]string, map[string]map[string]string) {
+	ws := project.ReadPnpmWorkspace(op.ProjectRoot)
+	return project.MergeOverrides(pkg.Overrides, ws.Overrides),
+		project.MergeNestedOverrides(pkg.NestedOverrides, ws.NestedOverrides)
 }
 
 func (op *Operation) releaseAge(cfg *npmrc.Config) regprovider.ReleaseAge {

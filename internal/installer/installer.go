@@ -189,6 +189,7 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 	// Overrides apply from package.json (npm `overrides` + pnpm `pnpm.overrides`)
 	// and pnpm-workspace.yaml `overrides`; the workspace (monorepo-wide) wins.
 	overrides, nestedOverrides := op.effectiveOverrides(pkg)
+	autoInstallPeers := op.autoInstallPeers(cfg)
 
 	var (
 		linkSpecs      []linker.LinkSpec
@@ -231,7 +232,7 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 			Provider:           provider,
 			Overrides:          overrides,
 			NestedOverrides:    nestedOverrides,
-			AutoInstallPeers:   true,
+			AutoInstallPeers:   autoInstallPeers,
 			BlockExoticSubdeps: blockExotic,
 			TrustedExotic:      policy.IsTrustedExoticRepo,
 			ResolveExotic:      resolveExotic,
@@ -295,7 +296,7 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 			Overrides:        overrides,
 			NestedOverrides:  nestedOverrides,
 			Preferred:        op.preferred(existing),
-			AutoInstallPeers: true,
+			AutoInstallPeers: autoInstallPeers,
 		})
 		solution, serr := solver.Solve()
 		if serr != nil {
@@ -662,6 +663,13 @@ func (op *Operation) effectiveOverrides(pkg *project.PackageJSON) (map[string]st
 	ws := project.ReadPnpmWorkspace(op.ProjectRoot)
 	return project.MergeOverrides(pkg.Overrides, ws.Overrides),
 		project.MergeNestedOverrides(pkg.NestedOverrides, ws.NestedOverrides)
+}
+
+// autoInstallPeers reports whether missing peer dependencies are pulled in.
+// pnpm defaults this true; an explicit auto-install-peers=false (in .npmrc or
+// pnpm-workspace.yaml) is honored instead of always installing peers.
+func (op *Operation) autoInstallPeers(cfg *npmrc.Config) bool {
+	return op.settingValue(cfg, "auto-install-peers") != "false"
 }
 
 func (op *Operation) releaseAge(cfg *npmrc.Config) regprovider.ReleaseAge {

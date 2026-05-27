@@ -33,7 +33,7 @@ func bindInstallFlags(fs *flag.FlagSet) *installFlags {
 	fs.BoolVar(&f.frozen, "frozen-lockfile", false, "fail if the lockfile would change")
 	fs.BoolVar(&f.ignoreScripts, "ignore-scripts", false, "do not run lifecycle scripts")
 	fs.StringVar(&f.allowScripts, "allow-scripts", "allowlist", "none|allowlist|all")
-	fs.IntVar(&f.minReleaseAge, "min-release-age", 0, "minimum release age in minutes")
+	fs.IntVar(&f.minReleaseAge, "min-release-age", -1, "minimum release age in minutes (default: 1440 in pnpm mode, 0 in npm mode)")
 	fs.BoolVar(&f.offline, "offline", false, "forbid network access")
 	fs.BoolVar(&f.preferOffline, "prefer-offline", false, "prefer cached data")
 	fs.BoolVar(&f.production, "production", false, "skip devDependencies")
@@ -56,7 +56,9 @@ func (f *installFlags) options() (installer.Options, error) {
 	default:
 		return opts, core.Usage("--allow-scripts must be none|allowlist|all, got %q", f.allowScripts)
 	}
-	if f.minReleaseAge < 0 {
+	// -1 is the sentinel for "unset" (use the mode default); anything below
+	// that is a user error.
+	if f.minReleaseAge < -1 {
 		return opts, core.Usage("--min-release-age must be non-negative")
 	}
 	sigPolicy, ok := signature.ParsePolicy(f.enforceSignature)

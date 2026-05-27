@@ -80,10 +80,10 @@ Each setting below documents: **Type**, **Default**, **Source**, and **Behavior*
 #### `minimumReleaseAge`
 
 - **Type**: non-negative integer (minutes)
-- **Default**: `0` (filter disabled)
+- **Default**: when unset, **mode-dependent**: `1440` (one day) in pnpm mode, matching pnpm's own default; `0` (disabled) in npm mode, matching npm. An explicit `.npmrc` / flag value of `0` disables the filter in either mode.
 - **Source**: `.npmrc minimum-release-age=` or CLI `--min-release-age=`
 
-When the value is greater than `0`, a candidate version `v` of a package is filtered out of the resolver's candidate list when the registry's `time[v]` is more recent than `now - <value> minutes`. The filter requires the full packument (not the slim form); gnpm requests it automatically when the filter is on. `0` (or empty / unset) disables the filter. Unit suffixes (`24h`, `7d`, etc.) are rejected — pnpm's `minimumReleaseAge` is plain minutes, and accepting suffixes would make the same `pnpm-workspace.yaml` value behave differently under gnpm.
+When the effective value is greater than `0`, a candidate version `v` of a package is filtered out of the resolver's candidate list when the registry's `time[v]` is more recent than `now - <value> minutes`. The filter requires the full packument (not the slim form); gnpm requests it automatically when the filter is on. An explicit `0` disables the filter. Leaving it unset applies the mode default above — so a plain `gnpm install` in a pnpm project is no less guarded against freshly published (and thus less-vetted) releases than pnpm. Unit suffixes (`24h`, `7d`, etc.) are rejected — pnpm's `minimumReleaseAge` is plain minutes, and accepting suffixes would make the same `pnpm-workspace.yaml` value behave differently under gnpm.
 
 ```
 # .npmrc — wait 1 day before installing a newly published version

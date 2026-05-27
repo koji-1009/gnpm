@@ -653,9 +653,17 @@ func (op *Operation) EffectiveScriptPolicyOK() bool {
 
 func (op *Operation) releaseAge(cfg *npmrc.Config) regprovider.ReleaseAge {
 	min := op.Options.MinReleaseAge
-	if min == 0 {
-		if m := cfg.Int("minimum-release-age", 0); m > 0 {
+	if min < 0 { // unset by flag → .npmrc, else the project mode's default
+		switch m := cfg.Int("minimum-release-age", -1); {
+		case m >= 0:
 			min = time.Duration(m) * time.Minute
+		case project.DetectMode(op.ProjectRoot) == project.ModePnpm:
+			// pnpm enables a one-day minimum-release-age gate by default;
+			// match it in pnpm mode so gnpm is no less safe out of the box.
+			// npm applies no such gate, so npm mode stays 0.
+			min = PnpmDefaultMinReleaseAge
+		default:
+			min = 0
 		}
 	}
 	exclude := splitCSV(cfg.GetOr("minimum-release-age-exclude", ""))

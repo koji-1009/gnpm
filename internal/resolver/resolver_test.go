@@ -1,6 +1,9 @@
 package resolver
 
 import (
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/koji-1009/gnpm/internal/semver"
@@ -141,5 +144,63 @@ func TestResolvePreferred(t *testing.T) {
 	})
 	if got["a"] != "1.1.0" {
 		t.Errorf("a = %q, want 1.1.0 (preferred)", got["a"])
+	}
+}
+
+// TestResolveDeterministic guards reproducibility: given identical inputs the
+// solver must produce identical resolutions on every run, regardless of Go's
+// randomized map iteration. The graph forces two independent backtracks (a→x
+// and c→y), which exercises conflict ordering in unit propagation — the path
+// most sensitive to iteration order. A regression here (e.g. iterating an
+// unordered map where order feeds backtracking) would make the emitted
+// lockfile non-reproducible.
+func TestResolveDeterministic(t *testing.T) {
+	build := func() *InMemoryProvider {
+		return NewInMemoryProvider(map[string]map[string]PackageDependencies{
+			"a": {"1.0.0": deps(dep{"x": "^1.0.0"}), "2.0.0": deps(dep{"x": "^2.0.0"})},
+			"b": {"1.0.0": deps(dep{"x": "^1.0.0"})},
+			"c": {"1.0.0": deps(dep{"y": "^1.0.0"}), "2.0.0": deps(dep{"y": "^2.0.0"})},
+			"e": {"1.0.0": deps(dep{"y": "^1.0.0"})},
+			"x": {"1.0.0": deps(nil), "2.0.0": deps(nil)},
+			"y": {"1.0.0": deps(nil), "2.0.0": deps(nil)},
+		})
+	}
+	req := func(p *InMemoryProvider) Request {
+		return Request{Dependencies: dep{"a": "*", "b": "*", "c": "*", "e": "*"}, Provider: p}
+	}
+
+	canon := func(m map[string]semver.Version) string {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b strings.Builder
+		for _, k := range keys {
+			fmt.Fprintf(&b, "%s=%s;", k, m[k])
+		}
+		return b.String()
+	}
+
+	// b backtracks a off 2.0.0 (its x@^2 clashes with b's x@^1); e backtracks
+	// c off 2.0.0 likewise. Expected: everything on the 1.x line.
+	const want = "a=1.0.0;b=1.0.0;c=1.0.0;e=1.0.0;x=1.0.0;y=1.0.0;"
+	var first string
+	for i := 0; i < 200; i++ {
+		res, err := NewSolver(req(build())).Solve()
+		if err != nil {
+			t.Fatalf("run %d: solve failed: %v", i, err)
+		}
+		got := canon(res.Assignments)
+		if i == 0 {
+			first = got
+			if got != want {
+				t.Fatalf("resolution = %q, want %q", got, want)
+			}
+			continue
+		}
+		if got != first {
+			t.Fatalf("run %d diverged from run 0:\n run0=%s\n now =%s", i, first, got)
+		}
 	}
 }

@@ -181,7 +181,20 @@ if gnpm diverges (a version it resolves differently, or input one side accepts a
 other rejects). It needs `npm`, `pnpm`, and network access, and must run outside a
 restrictive sandbox. Run a single fixture with `make conformance ARGS="--fixture lodash"`
 or point at a prebuilt binary with `ARGS="--gnpm-bin ./gnpm"`. The harness lives in
-[tools/conformance](tools/conformance/main.go).
+[tools/conformance](tools/conformance/main.go). Both tools run at their real
+defaults — no flags are injected to paper over differences. gnpm defaults its
+minimum-release-age supply-chain gate to pnpm's (one day) in pnpm mode and to
+none in npm mode, matching each reference's own default, so a freshly published
+version is withheld or admitted the same way on both sides.
+
+`make conformance ARGS="--roundtrip"` asks the opposite question: does pnpm accept the
+`pnpm-lock.yaml` gnpm *writes*? For each fixture it has gnpm produce a lockfile, then
+checks (1) whether `pnpm install --frozen-lockfile` consumes it as-is, and (2) how its
+snapshot structure compares to the lockfile pnpm produces from scratch. pnpm accepts
+gnpm's lockfile in every fixture; the one structural difference is that pnpm keys
+peer-bearing snapshots by peer context (`name@version(peer@v)`) while gnpm's
+single-version model writes them flat — the resolved graph is the same size, and pnpm
+tolerates the flat form.
 
 ## License
 

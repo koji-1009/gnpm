@@ -25,6 +25,7 @@ type Solver struct {
 	solution      []*assignment
 	byPkg         map[string][]*assignment
 	incompat      []Incompatibility
+	incompatByPkg map[string][]int // package → indices into incompat that mention it
 	changed       map[string]bool
 	decisionLevel int
 	forbidden     map[string]map[string]bool
@@ -38,6 +39,7 @@ func NewSolver(req Request) *Solver {
 	return &Solver{
 		req:           req,
 		byPkg:         map[string][]*assignment{},
+		incompatByPkg: map[string][]int{},
 		changed:       map[string]bool{},
 		forbidden:     map[string]map[string]bool{},
 		versionsCache: map[string][]semver.Version{},
@@ -148,11 +150,17 @@ func (s *Solver) unitPropagate(start string) error {
 		pkg := anyKey(s.changed)
 		delete(s.changed, pkg)
 
-		for i := len(s.incompat) - 1; i >= 0; i-- {
-			inc := s.incompat[i]
-			if !mentions(inc, pkg) {
-				continue
-			}
+		// Only incompatibilities mentioning pkg can change status when
+		// pkg's assignments change, so walk the per-package index rather
+		// than every incompatibility. Visit newest-first (descending
+		// insertion index), matching the order the full scan used: which
+		// satisfied incompatibility surfaces first drives backtracking, so
+		// preserving the order keeps resolution — and the lockfile —
+		// identical. onConflict may append to this slice, but it returns
+		// escalated immediately after, so iterating the snapshot is safe.
+		idxs := s.incompatByPkg[pkg]
+		for i := len(idxs) - 1; i >= 0; i-- {
+			inc := s.incompat[idxs[i]]
 			status, unsat := s.check(inc)
 			switch status {
 			case incSatisfied:
@@ -373,7 +381,28 @@ func (s *Solver) addIncompat(inc Incompatibility) {
 	if len(inc.Terms) == 0 {
 		return
 	}
+	idx := len(s.incompat)
 	s.incompat = append(s.incompat, inc)
+	// Index the incompatibility under each distinct package it mentions so
+	// unit propagation can fetch only the relevant incompatibilities instead
+	// of scanning the whole list. Incompatibilities are append-only for the
+	// life of a solve (backtracking removes assignments, never
+	// incompatibilities — see backtrackTo), so an index entry never goes
+	// stale. Terms are at most a handful, so the O(terms²) dedup is cheaper
+	// than allocating a set per call.
+	for i, t := range inc.Terms {
+		dup := false
+		for j := 0; j < i; j++ {
+			if inc.Terms[j].Package == t.Package {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		s.incompatByPkg[t.Package] = append(s.incompatByPkg[t.Package], idx)
+	}
 }
 
 func (s *Solver) derive(t Term, cause *Incompatibility) {
@@ -645,15 +674,6 @@ func (s *Solver) explainRecent() string {
 		count++
 	}
 	return b.String()
-}
-
-func mentions(inc Incompatibility, pkg string) bool {
-	for _, t := range inc.Terms {
-		if t.Package == pkg {
-			return true
-		}
-	}
-	return false
 }
 
 // anyKey returns the lexicographically smallest key, making the

@@ -53,6 +53,11 @@ var fixtures = []fixture{
 
 const registryURL = "https://registry.npmjs.org/"
 
+// Both tools run at their real defaults; no release-age flags are injected.
+// gnpm now defaults its minimum-release-age to pnpm's (one day) in pnpm mode
+// and to none in npm mode, matching each reference's own default gate, so the
+// comparison needs no harness-side adjustment to that policy.
+
 type result struct {
 	ok   bool
 	vers map[string]map[string]bool // name → set of versions
@@ -62,6 +67,7 @@ type result struct {
 func main() {
 	gnpmBin := flag.String("gnpm-bin", "", "gnpm binary to test (built from ./cmd/gnpm if empty)")
 	only := flag.String("fixture", "", "run only this fixture by name")
+	roundtrip := flag.Bool("roundtrip", false, "instead of comparing version sets, check whether pnpm accepts the pnpm-lock.yaml gnpm writes (frozen install) and whether a normal install rewrites it")
 	flag.Parse()
 
 	bin, cleanup, err := resolveGnpmBin(*gnpmBin)
@@ -77,6 +83,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer os.RemoveAll(home)
+
+	if *roundtrip {
+		runRoundtripSuite(bin, home, *only)
+		return
+	}
 
 	diverged := 0
 	checked := 0
@@ -102,6 +113,240 @@ func main() {
 	if diverged > 0 {
 		os.Exit(1)
 	}
+}
+
+// --- round-trip mode --------------------------------------------------
+//
+// The default mode proves gnpm *resolves* like pnpm (same version set). It
+// does not prove gnpm *writes* a pnpm-lock.yaml that pnpm itself accepts:
+// gnpm emits flat `name@version` snapshot keys, whereas pnpm instances a
+// package per peer-dependency context and keys snapshots `name@version(peer@v)`.
+// Round-trip mode measures the consequence directly with two questions per
+// fixture:
+//
+//	A. frozen   — does `pnpm install --frozen-lockfile` accept gnpm's lockfile
+//	              as-is? (the CI question: can a pnpm user consume it.)
+//	B. rewrite  — does `pnpm install --lockfile-only` leave gnpm's lockfile
+//	              byte-equal, or rewrite it to pnpm's canonical form? (the
+//	              churn question: is gnpm's output already canonical.)
+func runRoundtripSuite(bin, home, only string) {
+	if !toolAvailable("pnpm") {
+		fmt.Fprintln(os.Stderr, "pnpm not on PATH; round-trip mode needs pnpm")
+		os.Exit(1)
+	}
+	checked, rejected, peerDiverged := 0, 0, 0
+	for _, fx := range fixtures {
+		if only != "" && fx.name != only {
+			continue
+		}
+		checked++
+		v := runRoundtrip(fx, bin, home)
+		if v.frozenRejected {
+			rejected++
+		}
+		if v.peerDiverged {
+			peerDiverged++
+		}
+	}
+	fmt.Printf("\n=== %d fixture(s): %d rejected by frozen install, %d with peer-context structural divergence ===\n",
+		checked, rejected, peerDiverged)
+}
+
+type roundtripVerdict struct {
+	frozenRejected bool
+	peerDiverged   bool // pnpm peer-instances snapshots that gnpm writes flat
+}
+
+// runRoundtrip resolves a fixture with gnpm, then measures two things about the
+// pnpm-lock.yaml gnpm writes: (1) whether `pnpm install --frozen-lockfile`
+// accepts it as-is, and (2) how its snapshot structure compares to the lockfile
+// pnpm itself produces from scratch — specifically pnpm's peer-context
+// instancing (`name@version(peer@v)` keys), which gnpm's single-version model
+// writes flat.
+func runRoundtrip(fx fixture, bin, home string) roundtripVerdict {
+	tag := fmt.Sprintf("== %s [roundtrip]:", fx.name)
+
+	lock, err := gnpmProduceLock(fx, bin, home)
+	if err != nil {
+		fmt.Printf("%s gnpm could not produce a lockfile: %s\n", tag, err)
+		return roundtripVerdict{}
+	}
+	gnpmKeys, err := snapshotKeySet(lock)
+	if err != nil {
+		fmt.Printf("%s could not parse gnpm lockfile: %s\n", tag, err)
+		return roundtripVerdict{}
+	}
+
+	frozenOK, frozenNote := pnpmFrozenAccepts(fx, lock, home)
+	pnpmKeys, nativeErr := pnpmNativeKeys(fx, home)
+
+	var v roundtripVerdict
+	frozen := "ACCEPT"
+	if !frozenOK {
+		frozen = "REJECT"
+		v.frozenRejected = true
+	}
+
+	structure := "?"
+	if nativeErr != nil {
+		structure = "native-resolve-failed(" + nativeErr.Error() + ")"
+	} else {
+		gnpmPeer := countPeerSuffixed(gnpmKeys)
+		pnpmPeer := countPeerSuffixed(pnpmKeys)
+		if pnpmPeer > gnpmPeer {
+			v.peerDiverged = true
+		}
+		structure = fmt.Sprintf("peer-instanced snapshots pnpm=%d gnpm=%d (of pnpm %d / gnpm %d total)",
+			pnpmPeer, gnpmPeer, len(pnpmKeys), len(gnpmKeys))
+		if ex := firstWithParen(minus(pnpmKeys, gnpmKeys), 1); len(ex) > 0 && pnpmPeer > gnpmPeer {
+			structure += "; e.g. " + ex[0]
+		}
+	}
+
+	fmt.Printf("%s frozen=%s  %s\n", tag, frozen, structure)
+	if !frozenOK && frozenNote != "" {
+		fmt.Printf("    frozen-lockfile error: %s\n", frozenNote)
+	}
+	return v
+}
+
+func countPeerSuffixed(keys map[string]bool) int {
+	n := 0
+	for k := range keys {
+		if strings.ContainsRune(k, '(') {
+			n++
+		}
+	}
+	return n
+}
+
+// gnpmProduceLock runs gnpm in pnpm mode and returns the pnpm-lock.yaml bytes.
+func gnpmProduceLock(fx fixture, bin, home string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "gnpm-rt-gnpm-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(fx.pkgJSON), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-workspace.yaml"), []byte("packages: []\n"), 0o644); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(bin, "--silent", "install", "--ignore-scripts")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%s", tail(string(out)))
+	}
+	return os.ReadFile(filepath.Join(dir, "pnpm-lock.yaml"))
+}
+
+// pnpmFrozenAccepts writes gnpm's lockfile beside the fixture and asks pnpm to
+// install with --frozen-lockfile: success means pnpm consumes gnpm's lockfile
+// as-is, failure means it rejects it as not up to date / incompatible.
+func pnpmFrozenAccepts(fx fixture, lock []byte, home string) (bool, string) {
+	dir, err := os.MkdirTemp("", "gnpm-rt-frozen-")
+	if err != nil {
+		return false, err.Error()
+	}
+	defer os.RemoveAll(dir)
+	if err := writeLockFixture(dir, fx, lock); err != nil {
+		return false, err.Error()
+	}
+	cmd := exec.Command("pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--config.confirmModulesPurge=false")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+home, "npm_config_fund=false", "npm_config_audit=false")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return false, tail(string(out))
+	}
+	return true, ""
+}
+
+// pnpmNativeKeys resolves the fixture with pnpm from scratch (no seed lockfile,
+// metadata-only, no tarball downloads) and returns the snapshot key set of the
+// lockfile pnpm produces — i.e. pnpm's canonical structure, with peer-context
+// instancing — so the caller can compare it to gnpm's flat output.
+func pnpmNativeKeys(fx fixture, home string) (map[string]bool, error) {
+	dir, err := os.MkdirTemp("", "gnpm-rt-native-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(fx.pkgJSON), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-workspace.yaml"), []byte("packages: []\n"), 0o644); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("pnpm", "install", "--lockfile-only", "--silent")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+home, "npm_config_fund=false", "npm_config_audit=false")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%s", tail(string(out)))
+	}
+	native, err := os.ReadFile(filepath.Join(dir, "pnpm-lock.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	return snapshotKeySet(native)
+}
+
+func writeLockFixture(dir string, fx fixture, lock []byte) error {
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(fx.pkgJSON), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pnpm-workspace.yaml"), []byte("packages: []\n"), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "pnpm-lock.yaml"), lock, 0o644)
+}
+
+func snapshotKeySet(lock []byte) (map[string]bool, error) {
+	p, err := lockfile.ParsePnpm(lock)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for k := range p.Snapshots {
+		out[k] = true
+	}
+	return out, nil
+}
+
+// minus returns the elements of a not present in b.
+func minus(a, b map[string]bool) []string {
+	var out []string
+	for k := range a {
+		if !b[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// firstWithParen returns up to n keys that carry a peer-context suffix.
+func firstWithParen(keys []string, n int) []string {
+	var out []string
+	for _, k := range keys {
+		if strings.ContainsRune(k, '(') {
+			out = append(out, k)
+			if len(out) == n {
+				break
+			}
+		}
+	}
+	if len(out) == 0 && len(keys) > 0 {
+		// no peer suffix among the additions; show plain examples
+		for _, k := range keys {
+			out = append(out, k)
+			if len(out) == n {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // reportOne prints one comparison and returns true on divergence.
@@ -184,7 +429,8 @@ func runGnpm(mode string, fx fixture, bin, home string) result {
 		return result{note: err.Error()}
 	}
 	// An empty pnpm-workspace.yaml forces gnpm into pnpm mode (isolated +
-	// pnpm-lock.yaml); a bare dir is npm/hoisted mode.
+	// pnpm-lock.yaml); a bare dir is npm/hoisted mode. gnpm picks its own
+	// mode-appropriate release-age default, matching the reference.
 	if mode == "pnpm" {
 		if err := os.WriteFile(filepath.Join(dir, "pnpm-workspace.yaml"), []byte("packages: []\n"), 0o644); err != nil {
 			return result{note: err.Error()}

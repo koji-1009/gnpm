@@ -13,10 +13,11 @@ import (
 // keyed in the kebab-case .npmrc form so they can merge into the config
 // layer (spec §2.1 point 6) in pnpm mode.
 type PnpmWorkspace struct {
-	Packages              []string
-	AllowBuilds           []string
-	OnlyBuiltDependencies []string
-	ConfigDependencies    map[string]string
+	Packages               []string
+	AllowBuilds            []string
+	OnlyBuiltDependencies  []string
+	NeverBuiltDependencies []string
+	ConfigDependencies     map[string]string
 	// Catalog is the default catalog (top-level `catalog:`), also folded
 	// into Catalogs["default"].
 	Catalog map[string]string
@@ -36,7 +37,8 @@ type PnpmWorkspace struct {
 // IsEmpty reports whether nothing install-relevant was found.
 func (w *PnpmWorkspace) IsEmpty() bool {
 	return len(w.Packages) == 0 && len(w.AllowBuilds) == 0 &&
-		len(w.OnlyBuiltDependencies) == 0 && len(w.ConfigDependencies) == 0 &&
+		len(w.OnlyBuiltDependencies) == 0 && len(w.NeverBuiltDependencies) == 0 &&
+		len(w.ConfigDependencies) == 0 &&
 		len(w.Catalog) == 0 && len(w.Catalogs) == 0 &&
 		len(w.NamedRegistries) == 0 && len(w.Settings) == 0 &&
 		len(w.Overrides) == 0 && len(w.NestedOverrides) == 0
@@ -46,7 +48,8 @@ func (w *PnpmWorkspace) IsEmpty() bool {
 // Settings.
 var structuredKeys = map[string]bool{
 	"packages": true, "allowbuilds": true, "onlybuiltdependencies": true,
-	"configdependencies": true, "catalog": true, "catalogs": true,
+	"neverbuiltdependencies": true,
+	"configdependencies":     true, "catalog": true, "catalogs": true,
 	"namedregistries": true, "settings": true, "overrides": true,
 	// pnpm-lock.yaml carries these too; never treat them as settings.
 	"importers": true, "lockfileversion": true, "snapshots": true,
@@ -82,6 +85,7 @@ func parsePnpmDoc(doc map[string]any, w *PnpmWorkspace) {
 	w.Packages = yamlStringList(doc["packages"])
 	w.AllowBuilds = yamlStringList(doc["allowBuilds"])
 	w.OnlyBuiltDependencies = yamlStringList(doc["onlyBuiltDependencies"])
+	w.NeverBuiltDependencies = yamlStringList(doc["neverBuiltDependencies"])
 	w.ConfigDependencies = yamlConfigDeps(doc["configDependencies"])
 
 	if cat := yamlStringMap(doc["catalog"]); len(cat) > 0 {

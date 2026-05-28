@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/koji-1009/gnpm/internal/core"
@@ -93,9 +94,11 @@ func assembleHoisted(
 	placements []treeresolver.Placement,
 	infos map[string]sliceInfo,
 	aliasByPackage map[string]string,
+	versionAtPath map[string]string,
 ) ([]linker.LinkSpec, map[string]lockfile.LockedPackage) {
 	var linkSpecs []linker.LinkSpec
 	lockPackages := map[string]lockfile.LockedPackage{}
+
 	for _, p := range placements {
 		info, ok := infos[p.Name+"@"+p.Version.String()]
 		if !ok {
@@ -105,6 +108,17 @@ func assembleHoisted(
 		// A direct top-level npm: alias installs under its logical name.
 		if alias, ok := aliasByPackage[p.Name]; ok && p.Path == p.Name {
 			path = alias
+		}
+		edges := map[string]string{}
+		for d := range info.deps {
+			if v, ok := resolveEdgeVersion(path, d, versionAtPath); ok {
+				edges[d] = v
+			}
+		}
+		for d := range info.optDeps {
+			if v, ok := resolveEdgeVersion(path, d, versionAtPath); ok {
+				edges[d] = v
+			}
 		}
 		// Always record the lockfile entry (keeps the lockfile
 		// cross-platform); only link the packages for this platform.
@@ -122,10 +136,49 @@ func assembleHoisted(
 		linkSpecs = append(linkSpecs, linker.LinkSpec{
 			Name: p.Name, Version: p.Version.String(), Integrity: info.integrity,
 			Bin: info.bin, Scripts: info.scripts, Engines: info.engines,
-			IsDirect: p.IsDirect, Path: path,
+			IsDirect: p.IsDirect, Path: path, Dependencies: edges,
+			LinkAlias: aliasByPackage[p.Name],
 		})
 	}
 	return linkSpecs, lockPackages
+}
+
+// versionsByPath maps every placement's install path to its version (the
+// exotic version label for git/https instances), so a consumer's dependency
+// edges can be resolved to concrete versions. Shared by the registry and
+// exotic assembly so an exotic package's edges resolve against the same tree.
+func versionsByPath(placements []treeresolver.Placement, aliasByPackage map[string]string) map[string]string {
+	out := make(map[string]string, len(placements))
+	for _, p := range placements {
+		pp := p.Path
+		if alias, ok := aliasByPackage[p.Name]; ok && p.Path == p.Name {
+			pp = alias
+		}
+		v := p.Version.String()
+		if p.Exotic {
+			v = p.VersionLabel
+		}
+		out[pp] = v
+	}
+	return out
+}
+
+// resolveEdgeVersion finds the version a dependency edge resolves to from a
+// consumer at consumerPath: the nearest node_modules walking up from that path,
+// then the top level — mirroring Node's resolution over the hoisted tree.
+func resolveEdgeVersion(consumerPath, dep string, versionAtPath map[string]string) (string, bool) {
+	for prefix := consumerPath; ; {
+		if v, ok := versionAtPath[prefix+"/node_modules/"+dep]; ok {
+			return v, true
+		}
+		i := strings.LastIndex(prefix, "/node_modules/")
+		if i < 0 {
+			break
+		}
+		prefix = prefix[:i]
+	}
+	v, ok := versionAtPath[dep] // hoisted to the top level
+	return v, ok
 }
 
 // tarballFetcher is a bounded worker pool that downloads + verifies +

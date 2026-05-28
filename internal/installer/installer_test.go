@@ -576,3 +576,98 @@ func lastSeg(name string) string {
 	}
 	return name
 }
+
+// TestInstallMultipleVersionsIsolated is the isolated-linker counterpart of
+// TestInstallMultipleVersions: a version-conflicting graph (A→x@^1, B→x@^2)
+// must install in isolated mode too. The old isolated path used the
+// single-version pubgrub solver and errored here; it now resolves through the
+// multi-version tree resolver, so both versions live in the virtual store and
+// each consumer's private node_modules links to the right one.
+func TestInstallMultipleVersionsIsolated(t *testing.T) {
+	reg := newFakeReg(t)
+	reg.add(t, "x", "1.5.0", nil, nil)
+	reg.add(t, "x", "2.3.0", nil, nil)
+	reg.add(t, "A", "1.0.0", map[string]string{"x": "^1.0.0"}, nil)
+	reg.add(t, "B", "1.0.0", map[string]string{"x": "^2.0.0"}, nil)
+	root := t.TempDir()
+	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"A":"^1.0.0","B":"^1.0.0"}}`)
+	// Select the isolated (pnpm-style) linker.
+	if err := os.WriteFile(filepath.Join(root, ".npmrc"),
+		[]byte("registry="+reg.srv.URL+"/\nnode-linker=isolated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newOp(t, root).Run(context.Background()); err != nil {
+		t.Fatalf("isolated mode must install a version-conflicting graph, not error: %v", err)
+	}
+
+	// Both versions live in the .pnpm virtual store.
+	store := filepath.Join(root, "node_modules", ".pnpm")
+	for _, v := range []string{"x@1.5.0", "x@2.3.0"} {
+		if _, err := os.Stat(filepath.Join(store, v, "node_modules", "x", "package.json")); err != nil {
+			t.Errorf("virtual store missing %s: %v", v, err)
+		}
+	}
+	// Each consumer's private node_modules resolves x to its own version.
+	readX := func(consumer string) string {
+		b, err := os.ReadFile(filepath.Join(store, consumer, "node_modules", "x", "package.json"))
+		if err != nil {
+			t.Fatalf("%s cannot see its x dependency: %v", consumer, err)
+		}
+		return string(b)
+	}
+	if got := readX("A@1.0.0"); !strings.Contains(got, `"1.5.0"`) {
+		t.Errorf("A should resolve x@1.5.0, got %s", got)
+	}
+	if got := readX("B@1.0.0"); !strings.Contains(got, `"2.3.0"`) {
+		t.Errorf("B should resolve x@2.3.0, got %s", got)
+	}
+}
+
+// TestInstallGitDependencyIsolated verifies a direct git dependency installs in
+// isolated mode too. Routing isolated through the tree resolver means git deps
+// arrive as CopyFrom link specs (not registry tarballs), which the isolated
+// linker must materialize by copying the clone — exercised here.
+func TestInstallGitDependencyIsolated(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "commit.gpgsign", "false")
+	os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"name":"gitdep","version":"1.0.0","dependencies":{"leaf":"^1.0.0"}}`), 0o644)
+	run("add", ".")
+	run("commit", "-q", "--no-gpg-sign", "-m", "init")
+
+	reg := newFakeReg(t)
+	reg.add(t, "leaf", "1.0.0", nil, nil)
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"gitdep":"git+file://`+jsonStr(repo)+`"}}`)
+	if err := os.WriteFile(filepath.Join(root, ".npmrc"),
+		[]byte("registry="+reg.srv.URL+"/\nnode-linker=isolated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newOp(t, root).Run(context.Background()); err != nil {
+		t.Fatalf("isolated install of a git dependency must succeed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "node_modules", "gitdep", "package.json")); err != nil {
+		t.Errorf("git dependency not materialized in isolated mode: %v", err)
+	}
+	// In the isolated layout the git dep's transitive dep lives in the git
+	// dep's own private node_modules within the virtual store, not at top level.
+	matches, _ := filepath.Glob(filepath.Join(root, "node_modules", ".pnpm", "gitdep@*", "node_modules", "leaf", "package.json"))
+	if len(matches) == 0 {
+		t.Error("git dependency's transitive dep (leaf) not wired into its private node_modules in isolated mode")
+	}
+}

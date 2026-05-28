@@ -23,6 +23,10 @@ type PnpmWorkspace struct {
 	// Catalogs maps a catalog name to its (package → range) table.
 	Catalogs        map[string]map[string]string
 	NamedRegistries map[string]string
+	// Overrides / NestedOverrides come from pnpm-workspace.yaml `overrides`
+	// (pnpm's monorepo-wide dependency overrides), parsed like package.json's.
+	Overrides       map[string]string
+	NestedOverrides map[string]map[string]string
 	// Settings holds scalar policy keys converted to kebab-case (e.g.
 	// blockExoticSubdeps → block-exotic-subdeps), from both top-level
 	// scalars and a nested `settings:` block.
@@ -34,7 +38,8 @@ func (w *PnpmWorkspace) IsEmpty() bool {
 	return len(w.Packages) == 0 && len(w.AllowBuilds) == 0 &&
 		len(w.OnlyBuiltDependencies) == 0 && len(w.ConfigDependencies) == 0 &&
 		len(w.Catalog) == 0 && len(w.Catalogs) == 0 &&
-		len(w.NamedRegistries) == 0 && len(w.Settings) == 0
+		len(w.NamedRegistries) == 0 && len(w.Settings) == 0 &&
+		len(w.Overrides) == 0 && len(w.NestedOverrides) == 0
 }
 
 // structuredKeys are handled as typed fields and are not folded into
@@ -42,7 +47,7 @@ func (w *PnpmWorkspace) IsEmpty() bool {
 var structuredKeys = map[string]bool{
 	"packages": true, "allowbuilds": true, "onlybuiltdependencies": true,
 	"configdependencies": true, "catalog": true, "catalogs": true,
-	"namedregistries": true, "settings": true,
+	"namedregistries": true, "settings": true, "overrides": true,
 	// pnpm-lock.yaml carries these too; never treat them as settings.
 	"importers": true, "lockfileversion": true, "snapshots": true,
 }
@@ -96,6 +101,7 @@ func parsePnpmDoc(doc map[string]any, w *PnpmWorkspace) {
 	if nr := yamlStringMap(doc["namedRegistries"]); len(nr) > 0 {
 		w.NamedRegistries = nr
 	}
+	w.Overrides, w.NestedOverrides = parseOverrides(doc["overrides"])
 
 	for k, v := range doc {
 		if structuredKeys[strings.ToLower(k)] {

@@ -69,7 +69,42 @@ func PnpmToLockfile(p *PnpmLockfile, registry string) *Lockfile {
 			Signatures:           signaturesFromPnpm(entry.Signatures),
 		}
 	}
-	return &Lockfile{Version: SchemaVersion, Importers: map[string]Importer{".": importer}, Packages: packages}
+	return &Lockfile{
+		Version:   SchemaVersion,
+		Importers: map[string]Importer{".": importer},
+		Packages:  packages,
+		Pnpm:      pnpmPassthrough(p),
+	}
+}
+
+// pnpmPassthrough captures the pnpm-lock.yaml content the internal model does
+// not represent so LockfileToPnpm can re-emit it. Snapshot-preserved fields are
+// keyed by base "name@version" to match the flat keys the writer regenerates.
+func pnpmPassthrough(p *PnpmLockfile) *PnpmPassthrough {
+	pt := &PnpmPassthrough{
+		LockfileVersion:   p.LockfileVersion,
+		Settings:          p.Settings,
+		TopLevel:          p.PreservedTopLevel,
+		PackagePreserved:  map[string]map[string]any{},
+		SnapshotPreserved: map[string]map[string]any{},
+		ImporterPreserved: map[string]map[string]any{},
+	}
+	for key, e := range p.Packages {
+		if len(e.Preserved) > 0 {
+			pt.PackagePreserved[key] = e.Preserved
+		}
+	}
+	for key, e := range p.Snapshots {
+		if len(e.Preserved) > 0 {
+			pt.SnapshotPreserved[stripPeerSuffix(key)] = e.Preserved
+		}
+	}
+	for path, i := range p.Importers {
+		if len(i.Preserved) > 0 {
+			pt.ImporterPreserved[path] = i.Preserved
+		}
+	}
+	return pt
 }
 
 // LockfileToPnpm converts the internal model into a pnpm-lock.yaml v9
@@ -79,16 +114,19 @@ func PnpmToLockfile(p *PnpmLockfile, registry string) *Lockfile {
 // peers) are dropped, matching pnpm's "materialized edges only" rule.
 func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 	versionByName := map[string]string{}
+	byName := map[string]LockedPackage{}
 	for _, p := range lock.Packages {
 		versionByName[p.Name] = p.Version
+		byName[p.Name] = p
 	}
+	suffix := peerSuffixes(byName)
 
 	root := lock.Importers["."]
 	importer := PnpmImporter{
-		Dependencies:         directDeps(root.Dependencies, versionByName),
-		DevDependencies:      directDeps(root.DevDependencies, versionByName),
-		OptionalDependencies: directDeps(root.OptionalDependencies, versionByName),
-		PeerDependencies:     directDeps(root.PeerDependencies, versionByName),
+		Dependencies:         directDeps(root.Dependencies, versionByName, suffix),
+		DevDependencies:      directDeps(root.DevDependencies, versionByName, suffix),
+		OptionalDependencies: directDeps(root.OptionalDependencies, versionByName, suffix),
+		PeerDependencies:     directDeps(root.PeerDependencies, versionByName, suffix),
 	}
 
 	packages := map[string]PnpmPackageEntry{}
@@ -117,13 +155,15 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 			HasBin:               p.HasBin,
 			Signatures:           sigs,
 		}
-		snapshots[key] = PnpmSnapshotEntry{
-			Dependencies:         resolveEdges(p.Dependencies, versionByName),
-			OptionalDependencies: resolveEdges(p.OptionalDependencies, versionByName),
+		// packages: stays keyed by base name@version; snapshots: are keyed by
+		// the peer-context form pnpm uses, with edges referencing contextual keys.
+		snapshots[key+suffix[p.Name]] = PnpmSnapshotEntry{
+			Dependencies:         resolveEdgesCtx(p.Dependencies, versionByName, suffix),
+			OptionalDependencies: resolveEdgesCtx(p.OptionalDependencies, versionByName, suffix),
 		}
 	}
 
-	return &PnpmLockfile{
+	out := &PnpmLockfile{
 		LockfileVersion: "9.0",
 		Settings:        map[string]any{"autoInstallPeers": true, "excludeLinksFromLockfile": false},
 		Importers:       map[string]PnpmImporter{".": importer},
@@ -131,6 +171,38 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 		Snapshots:       snapshots,
 		Catalogs:        map[string]map[string]string{},
 	}
+	// Re-emit the pnpm-only content captured on read (overrides,
+	// patchedDependencies, time, the original settings block, per-package
+	// fields like libc, …) so a round trip does not silently drop it. Only
+	// the original settings/version override the defaults above.
+	if pt := lock.Pnpm; pt != nil {
+		if pt.LockfileVersion != "" {
+			out.LockfileVersion = pt.LockfileVersion
+		}
+		if len(pt.Settings) > 0 {
+			out.Settings = pt.Settings
+		}
+		out.PreservedTopLevel = pt.TopLevel
+		for key, pres := range pt.PackagePreserved {
+			if e, ok := out.Packages[key]; ok {
+				e.Preserved = pres
+				out.Packages[key] = e
+			}
+		}
+		for snapKey, e := range out.Snapshots {
+			if pres, ok := pt.SnapshotPreserved[stripPeerSuffix(snapKey)]; ok && len(pres) > 0 {
+				e.Preserved = pres
+				out.Snapshots[snapKey] = e
+			}
+		}
+		for path, pres := range pt.ImporterPreserved {
+			if e, ok := out.Importers[path]; ok {
+				e.Preserved = pres
+				out.Importers[path] = e
+			}
+		}
+	}
+	return out
 }
 
 func parsePnpmID(key string) (name, version string, ok bool) {
@@ -168,14 +240,14 @@ func specifierMap(deps map[string]PnpmDirectDep) map[string]string {
 	return out
 }
 
-func directDeps(declared map[string]string, versionByName map[string]string) map[string]PnpmDirectDep {
+func directDeps(declared map[string]string, versionByName, suffix map[string]string) map[string]PnpmDirectDep {
 	out := map[string]PnpmDirectDep{}
 	for name, spec := range declared {
 		version, ok := versionByName[name]
 		if !ok {
 			continue // workspace link / file: / git: tracked elsewhere
 		}
-		out[name] = PnpmDirectDep{Specifier: spec, Version: version}
+		out[name] = PnpmDirectDep{Specifier: spec, Version: version + suffix[name]}
 	}
 	return out
 }
@@ -186,6 +258,94 @@ func resolveEdges(deps map[string]string, versionByName map[string]string) map[s
 		if version, ok := versionByName[name]; ok {
 			out[name] = version
 		}
+	}
+	return out
+}
+
+// resolveEdgesCtx is resolveEdges with pnpm peer-context suffixes appended to
+// each edge value (`version(peer@v)…`), matching the snapshot keys pnpm emits.
+func resolveEdgesCtx(deps map[string]string, versionByName, suffix map[string]string) map[string]string {
+	out := map[string]string{}
+	for name := range deps {
+		if version, ok := versionByName[name]; ok {
+			out[name] = version + suffix[name]
+		}
+	}
+	return out
+}
+
+// peerSuffixes computes each package's pnpm peer-context suffix: the sorted
+// concatenation of "(peerKey)" over the package's peer context, where peerKey
+// is itself contextual (recursively). pnpm keys snapshots
+// name@version(peerA@vA)(peerB@vB(...)). gnpm resolves one version per package,
+// so each has a single context, derived from the resolved graph.
+//
+// A package's context is its own resolved peers plus peers that bubble up from
+// its dependency subtree — a dependency's peer propagates to the parent unless
+// the parent provides it as a regular dependency (pnpm's rule). Peers absent
+// from the graph (unsatisfied / absent optional) are omitted; pnpm records
+// those as transitivePeerDependencies, not in the key.
+func peerSuffixes(byName map[string]LockedPackage) map[string]string {
+	// peerSet(name): the names forming name's peer context.
+	setMemo := map[string]map[string]bool{}
+	var peerSet func(name string, stack map[string]bool) map[string]bool
+	peerSet = func(name string, stack map[string]bool) map[string]bool {
+		if s, ok := setMemo[name]; ok {
+			return s
+		}
+		p, ok := byName[name]
+		if !ok || stack[name] {
+			return nil // missing, or peer/dependency cycle — stop
+		}
+		stack[name] = true
+		set := map[string]bool{}
+		for peer := range p.PeerDependencies {
+			if _, ok := byName[peer]; ok {
+				set[peer] = true
+			}
+		}
+		bubble := func(deps map[string]string) {
+			for dep := range deps {
+				for q := range peerSet(dep, stack) {
+					if q == name {
+						continue // the package satisfies its own peer by being it
+					}
+					if _, provides := p.Dependencies[q]; !provides {
+						set[q] = true
+					}
+				}
+			}
+		}
+		bubble(p.Dependencies)
+		bubble(p.OptionalDependencies)
+		delete(stack, name)
+		setMemo[name] = set
+		return set
+	}
+	// suffix(name): "(Q@vQ+suffix(Q))" over peerSet(name), sorted.
+	suffixMemo := map[string]string{}
+	var suffix func(name string, stack map[string]bool) string
+	suffix = func(name string, stack map[string]bool) string {
+		if s, ok := suffixMemo[name]; ok {
+			return s
+		}
+		if stack[name] {
+			return ""
+		}
+		stack[name] = true
+		var pieces []string
+		for q := range peerSet(name, map[string]bool{}) {
+			pieces = append(pieces, "("+q+"@"+byName[q].Version+suffix(q, stack)+")")
+		}
+		delete(stack, name)
+		sort.Strings(pieces)
+		s := strings.Join(pieces, "")
+		suffixMemo[name] = s
+		return s
+	}
+	out := make(map[string]string, len(byName))
+	for name := range byName {
+		out[name] = suffix(name, map[string]bool{})
 	}
 	return out
 }

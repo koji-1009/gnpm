@@ -13,8 +13,8 @@ import (
 // prune removes top-level node_modules entries that are no longer part of
 // the install (extraneous packages left by a removed dependency), so the
 // tree matches the resolved set — npm/pnpm do this. Hidden entries
-// (.bin, .gnpm, .gnpm-config) are preserved, and scope directories are
-// pruned member-by-member.
+// (.bin, .pnpm, .gnpm, .gnpm-config) are preserved, and scope directories
+// are pruned member-by-member.
 func (op *Operation) prune(linkSpecs []linker.LinkSpec, pkg *project.PackageJSON) error {
 	nm := filepath.Join(op.ProjectRoot, "node_modules")
 	entries, err := os.ReadDir(nm)

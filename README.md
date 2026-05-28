@@ -84,10 +84,10 @@ Implemented and tested:
 
 - the full resolve → fetch → ingest → link → scripts → lockfile → state pipeline
 - all 19 spec commands
-- **multiple versions of the same package**: the default (hoisted) path uses an npm-style tree resolver that hoists the first version and nests conflicting ones (`a/node_modules/x`), so version-conflicting graphs install instead of failing — verified installing real trees like `eslint`. (The `node-linker=isolated` path uses the single-version pubgrub solver.)
+- **multiple versions of the same package**: both layouts resolve through an npm-style tree resolver that installs conflicting versions instead of failing — the hoisted layout nests them (`a/node_modules/x`), and the isolated (`node-linker=isolated`) layout keys a symlinked virtual store by `name@version` so the versions coexist. Verified installing real trees like `eslint`.
 - **pruning** of extraneous packages (a removed dependency is deleted from node_modules), and network **retries** on transient 429/5xx
 - both lockfile formats (`package-lock.json` v3 with nested `node_modules/.../node_modules/...` keys, `pnpm-lock.yaml`) read/write/convert
-- dependency specifiers: semver, `npm:` aliases, dist-tags, `file:`, `link:`, `https` tarballs (pinned by integrity), `git`/`github:` (pinned to a resolved commit), `catalog:`. git/https deps — **direct or transitive** (a registry package that itself declares a git/https URL) — are resolved through the tree resolver's injected fetch capability, recursing into their own dependencies and materializing as real directories so Node resolution reaches the hoisted deps. (Transitive exotic resolution applies to the default hoisted layout; the isolated layout supports direct git/https deps only.)
+- dependency specifiers: semver, `npm:` aliases, dist-tags, `file:`, `link:`, `https` tarballs (pinned by integrity), `git`/`github:` (pinned to a resolved commit), `catalog:`. git/https deps — **direct or transitive** (a registry package that itself declares a git/https URL) — are resolved through the tree resolver's injected fetch capability, recursing into their own dependencies and materializing as real directories so Node resolution reaches the hoisted deps. (Both layouts resolve transitive exotic deps; the isolated layout wires them into the depending package's private node_modules.)
 - multi-package **workspaces** (glob discovery, `workspace:` protocol, per-member node_modules)
 - the workspace-state fingerprint, build-script gate, `minimum-release-age`
 - security/policy: ECDSA signature verification, `audit` (+ `--audit-level` on install), `trustPolicy` no-downgrade (+ `trustPolicyIgnoreAfter`), `pmOnFail`, `catalogMode` `manual`/`prefer`/`strict`, and **`blockExoticSubdeps`** (enforced: a transitive git/https dependency is rejected unless its repo is on the trusted-repo allowlist)
@@ -95,7 +95,7 @@ Implemented and tested:
 
 Known limitations (stated plainly):
 
-- `node-linker=isolated` uses the single-version pubgrub solver, so a version-conflicting graph **errors** there (loudly), and it resolves only *direct* git/https deps (transitive exotic deps need the tree resolver). The default hoisted layout installs multiple versions and resolves transitive exotic deps.
+- the isolated layout's virtual store (`node_modules/.pnpm`) is keyed by `name@version`, so it represents multiple *versions* of a package but not pnpm's per-peer-context *instances* of the same version (gnpm writes one instance per version; the pnpm-lock.yaml snapshot keys still carry pnpm's peer-context suffixes).
 - Per the spec, the `--json` schemas are not frozen during 0.x.
 
 gnpm is also younger and less battle-tested than pnpm across unusual registries, large monorepos, and recovery paths — smaller code is partly design, partly immaturity.

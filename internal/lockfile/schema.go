@@ -14,6 +14,23 @@ type Lockfile struct {
 	Importers map[string]Importer
 	// Packages keyed by "<name>@<version>".
 	Packages map[string]LockedPackage
+	// Pnpm carries pnpm-lock.yaml content the npm-v3-shaped model above does
+	// not represent, so a pnpm→gnpm→pnpm round trip preserves it instead of
+	// silently dropping it. nil outside pnpm mode or with no prior lockfile.
+	Pnpm *PnpmPassthrough
+}
+
+// PnpmPassthrough holds pnpm-lock.yaml sections gnpm reads but does not model
+// (e.g. overrides, patchedDependencies, onlyBuiltDependencies, time, the
+// settings block, per-package fields like libc), captured on read so the
+// writer can re-emit them verbatim rather than discarding them.
+type PnpmPassthrough struct {
+	LockfileVersion   string
+	Settings          map[string]any
+	TopLevel          map[string]any            // unmodeled top-level sections
+	PackagePreserved  map[string]map[string]any // "name@version" → unmodeled package fields
+	SnapshotPreserved map[string]map[string]any // base "name@version" → unmodeled snapshot fields
+	ImporterPreserved map[string]map[string]any // importer path → unmodeled importer fields (e.g. dependenciesMeta)
 }
 
 // Importer is the direct dependency selectors of a workspace member.

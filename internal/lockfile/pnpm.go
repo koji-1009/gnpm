@@ -25,6 +25,9 @@ type PnpmImporter struct {
 	DevDependencies      map[string]PnpmDirectDep
 	OptionalDependencies map[string]PnpmDirectDep
 	PeerDependencies     map[string]PnpmDirectDep
+	// Preserved holds importer keys gnpm does not model (e.g.
+	// dependenciesMeta for injected deps), kept for lossless round trips.
+	Preserved map[string]any
 }
 
 type PnpmDirectDep struct {
@@ -56,6 +59,10 @@ type PnpmSnapshotEntry struct {
 var pnpmTopLevelKnown = map[string]bool{
 	"lockfileVersion": true, "settings": true, "importers": true,
 	"packages": true, "snapshots": true, "catalog": true, "catalogs": true,
+}
+var pnpmImporterKnown = map[string]bool{
+	"dependencies": true, "devDependencies": true,
+	"optionalDependencies": true, "peerDependencies": true,
 }
 var pnpmPackageKnown = map[string]bool{
 	"resolution": true, "engines": true, "os": true, "cpu": true,
@@ -93,6 +100,7 @@ func ParsePnpm(data []byte) (*PnpmLockfile, error) {
 			DevDependencies:      readDirectDeps(asMap(body["devDependencies"])),
 			OptionalDependencies: readDirectDeps(asMap(body["optionalDependencies"])),
 			PeerDependencies:     readDirectDeps(asMap(body["peerDependencies"])),
+			Preserved:            preservedExcept(body, pnpmImporterKnown),
 		}
 	}
 
@@ -149,6 +157,9 @@ func WritePnpmString(p *PnpmLockfile) (string, error) {
 			putDirectDeps(body, "devDependencies", i.DevDependencies)
 			putDirectDeps(body, "optionalDependencies", i.OptionalDependencies)
 			putDirectDeps(body, "peerDependencies", i.PeerDependencies)
+			for k, v := range i.Preserved {
+				body[k] = v
+			}
 			imp[path] = body
 		}
 		out["importers"] = imp

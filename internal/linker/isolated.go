@@ -10,27 +10,29 @@ import (
 )
 
 // IsolatedLinker materializes each package under
-// node_modules/.gnpm/<id>/node_modules/<name> and symlinks its declared
-// dependencies into that private node_modules, mirroring pnpm. Direct
-// dependencies are symlinked into the top-level node_modules.
+// node_modules/.pnpm/<id>/node_modules/<name> and symlinks its declared
+// dependencies into that private node_modules, mirroring pnpm's virtual store.
+// Direct dependencies are symlinked into the top-level node_modules. (gnpm's
+// own state — workspace-state, trust-history — lives under .gnpm, separate from
+// this store.)
 type IsolatedLinker struct {
 	Store *store.Store
 }
 
-func (l IsolatedLinker) gnpmRoot(projectRoot string) string {
-	return filepath.Join(projectRoot, "node_modules", ".gnpm")
+func (l IsolatedLinker) virtualStoreRoot(projectRoot string) string {
+	return filepath.Join(projectRoot, "node_modules", ".pnpm")
 }
 
 func (l IsolatedLinker) pkgDir(projectRoot string, spec LinkSpec) string {
-	return filepath.Join(l.gnpmRoot(projectRoot), safeID(spec.ID()), "node_modules", filepath.FromSlash(spec.Name))
+	return filepath.Join(l.virtualStoreRoot(projectRoot), safeID(spec.ID()), "node_modules", filepath.FromSlash(spec.Name))
 }
 
 // Link materializes and wires the package graph.
 func (l IsolatedLinker) Link(projectRoot string, packages []LinkSpec) error {
 	nodeModules := filepath.Join(projectRoot, "node_modules")
 	binDir := filepath.Join(nodeModules, ".bin")
-	if err := os.MkdirAll(l.gnpmRoot(projectRoot), 0o755); err != nil {
-		return core.IOError("creating node_modules/.gnpm").Wrap(err)
+	if err := os.MkdirAll(l.virtualStoreRoot(projectRoot), 0o755); err != nil {
+		return core.IOError("creating node_modules/.pnpm").Wrap(err)
 	}
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return core.IOError("creating node_modules/.bin").Wrap(err)
@@ -40,6 +42,14 @@ func (l IsolatedLinker) Link(projectRoot string, packages []LinkSpec) error {
 		dest := l.pkgDir(projectRoot, spec)
 		if _, err := os.Stat(dest); err == nil {
 			return nil
+		}
+		// git/https-sourced packages are copied from the clone/extract dir;
+		// registry ones are materialized from the content-addressable store.
+		if spec.CopyFrom != "" {
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return core.IOError("creating parent for %s", spec.Name).Wrap(err)
+			}
+			return platform.CopyTreeExcluding(spec.CopyFrom, dest, ".git")
 		}
 		return l.Store.Materialize(spec.Integrity, dest)
 	}); err != nil {
@@ -53,7 +63,7 @@ func (l IsolatedLinker) Link(projectRoot string, packages []LinkSpec) error {
 
 	// Wire each package's dependencies into its private node_modules.
 	for _, spec := range packages {
-		ownNM := filepath.Join(l.gnpmRoot(projectRoot), safeID(spec.ID()), "node_modules")
+		ownNM := filepath.Join(l.virtualStoreRoot(projectRoot), safeID(spec.ID()), "node_modules")
 		for depName, depVer := range spec.Dependencies {
 			dep, ok := byID[depName+"@"+depVer]
 			if !ok {

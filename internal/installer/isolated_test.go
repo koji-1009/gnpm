@@ -136,3 +136,62 @@ func TestNodeLinkerModeDefault(t *testing.T) {
 		}
 	})
 }
+
+// TestWorkspacePnpmImporters checks that a multi-package pnpm workspace writes
+// a shared pnpm-lock.yaml with a per-member importer section (pnpm's
+// structure), not just the root importer.
+func TestWorkspacePnpmImporters(t *testing.T) {
+	reg := newFakeReg(t)
+	reg.add(t, "leaf", "1.0.0", nil, nil)
+	root := t.TempDir()
+	writeProject(t, root, reg.srv.URL, `{"name":"mono","version":"1.0.0"}`)
+	// pnpm mode + workspace globs (read from pnpm-workspace.yaml in pnpm mode).
+	if err := os.WriteFile(filepath.Join(root, "pnpm-workspace.yaml"), []byte("packages:\n  - packages/*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name, body string) {
+		dir := filepath.Join(root, "packages", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("lib", `{"name":"lib","version":"1.0.0"}`)
+	mk("app", `{"name":"app","version":"1.0.0","dependencies":{"leaf":"^1.0.0","lib":"workspace:*"}}`)
+
+	if _, err := newOp(t, root).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "pnpm-lock.yaml"))
+	if err != nil {
+		t.Fatalf("no pnpm-lock.yaml: %v", err)
+	}
+	p, err := lockfile.ParsePnpm(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".", "packages/app", "packages/lib"} {
+		if _, ok := p.Importers[want]; !ok {
+			got := make([]string, 0, len(p.Importers))
+			for k := range p.Importers {
+				got = append(got, k)
+			}
+			t.Errorf("pnpm-lock.yaml missing importer %q; has %v", want, got)
+		}
+	}
+	if app, ok := p.Importers["packages/app"]; ok {
+		if _, ok := app.Dependencies["leaf"]; !ok {
+			t.Error("packages/app importer should record its leaf dependency")
+		}
+		// The workspace sibling is recorded as a link: version (pnpm's form),
+		// so pnpm accepts the lockfile instead of seeing the dep as missing.
+		if dep, ok := app.Dependencies["lib"]; !ok {
+			t.Error("packages/app importer missing the workspace dependency lib")
+		} else if dep.Version != "link:../lib" {
+			t.Errorf("workspace dep lib version = %q, want link:../lib", dep.Version)
+		}
+	}
+}

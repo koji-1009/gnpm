@@ -95,7 +95,7 @@ Implemented and tested:
 
 Known limitations (stated plainly):
 
-- the isolated layout keys its virtual store by `name@version`, so it represents multiple *versions* of a package but not pnpm's per-peer-context *instances* of the same version (gnpm writes one instance per version; the pnpm-lock.yaml snapshot keys still carry pnpm's peer-context suffixes).
+- the isolated layout's virtual store (`node_modules/.pnpm`) is keyed by `name@version`, so it represents multiple *versions* of a package but not pnpm's per-peer-context *instances* of the same version (gnpm writes one instance per version; the pnpm-lock.yaml snapshot keys still carry pnpm's peer-context suffixes).
 - Per the spec, the `--json` schemas are not frozen during 0.x.
 
 gnpm is also younger and less battle-tested than pnpm across unusual registries, large monorepos, and recovery paths — smaller code is partly design, partly immaturity.

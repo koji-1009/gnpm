@@ -95,7 +95,7 @@ func (op *Operation) reviewedAllowlist(pkg *project.PackageJSON) []string {
 
 func (op *Operation) linkedPath(kind linker.Kind, spec linker.LinkSpec) string {
 	if kind == linker.Isolated {
-		return filepath.Join(op.ProjectRoot, "node_modules", ".gnpm", safeID(spec.ID()), "node_modules", filepath.FromSlash(spec.Name))
+		return filepath.Join(op.ProjectRoot, "node_modules", ".pnpm", safeID(spec.ID()), "node_modules", filepath.FromSlash(spec.Name))
 	}
 	return filepath.Join(op.ProjectRoot, "node_modules", filepath.FromSlash(spec.Name))
 }

@@ -27,9 +27,9 @@ func isolatedProject(t *testing.T, root, registryURL, pkgJSON string) {
 }
 
 // isoStoreNM returns a package instance's private node_modules in the virtual
-// store: node_modules/.gnpm/<id>/node_modules (id = name@version, "/"→"+").
+// store: node_modules/.pnpm/<id>/node_modules (id = name@version, "/"→"+").
 func isoStoreNM(root, id string) string {
-	return filepath.Join(root, "node_modules", ".gnpm", strings.ReplaceAll(id, "/", "+"), "node_modules")
+	return filepath.Join(root, "node_modules", ".pnpm", strings.ReplaceAll(id, "/", "+"), "node_modules")
 }
 
 // TestIsolatedTransitive checks the isolated layout wires each package's

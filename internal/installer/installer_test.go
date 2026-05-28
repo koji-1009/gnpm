@@ -601,8 +601,8 @@ func TestInstallMultipleVersionsIsolated(t *testing.T) {
 		t.Fatalf("isolated mode must install a version-conflicting graph, not error: %v", err)
 	}
 
-	// Both versions live in the .gnpm virtual store.
-	store := filepath.Join(root, "node_modules", ".gnpm")
+	// Both versions live in the .pnpm virtual store.
+	store := filepath.Join(root, "node_modules", ".pnpm")
 	for _, v := range []string{"x@1.5.0", "x@2.3.0"} {
 		if _, err := os.Stat(filepath.Join(store, v, "node_modules", "x", "package.json")); err != nil {
 			t.Errorf("virtual store missing %s: %v", v, err)
@@ -666,7 +666,7 @@ func TestInstallGitDependencyIsolated(t *testing.T) {
 	}
 	// In the isolated layout the git dep's transitive dep lives in the git
 	// dep's own private node_modules within the virtual store, not at top level.
-	matches, _ := filepath.Glob(filepath.Join(root, "node_modules", ".gnpm", "gitdep@*", "node_modules", "leaf", "package.json"))
+	matches, _ := filepath.Glob(filepath.Join(root, "node_modules", ".pnpm", "gitdep@*", "node_modules", "leaf", "package.json"))
 	if len(matches) == 0 {
 		t.Error("git dependency's transitive dep (leaf) not wired into its private node_modules in isolated mode")
 	}

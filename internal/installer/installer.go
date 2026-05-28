@@ -480,7 +480,15 @@ func (op *Operation) link(cfg *npmrc.Config, st *store.Store, specs []linker.Lin
 }
 
 func (op *Operation) linkerKind(cfg *npmrc.Config) linker.Kind {
-	return linker.ParseKind(cfg.GetOr("node-linker", "hoisted"))
+	if v := op.settingValue(cfg, "node-linker"); v != "" {
+		return linker.ParseKind(v)
+	}
+	// No explicit node-linker: match each ecosystem's own default — pnpm
+	// defaults to the isolated layout, npm to the hoisted (flat) one.
+	if project.DetectMode(op.ProjectRoot) == project.ModePnpm {
+		return linker.Isolated
+	}
+	return linker.Hoisted
 }
 
 // --- helpers ----------------------------------------------------------

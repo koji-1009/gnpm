@@ -99,3 +99,40 @@ func TestIsolatedReproducible(t *testing.T) {
 		t.Error("lockfile missing lib@2.0.0")
 	}
 }
+
+// TestNodeLinkerModeDefault checks node-linker defaults to each ecosystem's
+// own default when unset: isolated (.pnpm store) in pnpm mode, hoisted (flat)
+// in npm mode.
+func TestNodeLinkerModeDefault(t *testing.T) {
+	t.Run("pnpm mode -> isolated", func(t *testing.T) {
+		reg := newFakeReg(t)
+		reg.add(t, "leaf", "1.0.0", nil, nil)
+		root := t.TempDir()
+		writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"leaf":"^1.0.0"}}`)
+		// pnpm mode, but NO node-linker set.
+		if err := os.WriteFile(filepath.Join(root, "pnpm-workspace.yaml"), []byte("packages: []\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newOp(t, root).Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "node_modules", ".pnpm", "leaf@1.0.0", "node_modules", "leaf", "package.json")); err != nil {
+			t.Errorf("pnpm mode should default to the isolated .pnpm store: %v", err)
+		}
+	})
+	t.Run("npm mode -> hoisted", func(t *testing.T) {
+		reg := newFakeReg(t)
+		reg.add(t, "leaf", "1.0.0", nil, nil)
+		root := t.TempDir()
+		writeProject(t, root, reg.srv.URL, `{"name":"demo","version":"1.0.0","dependencies":{"leaf":"^1.0.0"}}`)
+		if _, err := newOp(t, root).Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "node_modules", ".pnpm")); err == nil {
+			t.Error("npm mode should not create a .pnpm store")
+		}
+		if _, err := os.Stat(filepath.Join(root, "node_modules", "leaf", "package.json")); err != nil {
+			t.Errorf("npm mode should hoist leaf to the flat node_modules: %v", err)
+		}
+	})
+}

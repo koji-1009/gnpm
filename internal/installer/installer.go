@@ -94,16 +94,11 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 	}
 	op.prof.mark("read lock + hash + state")
 
-	// Past the no-op short-circuit: kick off node-version detection. The
-	// result is cached by node-binary identity, so only the first install
-	// on a host pays the ~40 ms fork+exec; later ones read the cache.
+	// Kick off node-version detection; the result is cached by node-binary
+	// identity, so only the first install on a host pays the fork+exec.
 	op.nodeVer = startNodeDetect(ctx, filepath.Join(op.cacheRoot(), "node-version.json"))
-	// Join that goroutine before returning on every path. It writes its
-	// disk cache from the background, so letting it outlive Run risks a
-	// write landing after the caller considers the install done (e.g. a
-	// partial cache file, or — in tests — a write racing t.TempDir cleanup
-	// and failing it with ENOTEMPTY). By the time Run returns, detection has
-	// almost always finished, so this join is effectively free.
+	// Join before returning so the background cache write can't outlive Run
+	// (a stray partial write, or a write racing t.TempDir cleanup in tests).
 	defer func() {
 		if op.nodeVer != nil {
 			op.nodeVer()
@@ -195,14 +190,10 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		lockPackages map[string]lockfile.LockedPackage
 		warnings     []string
 	)
-	// Both layouts resolve through the npm-style tree resolver: it installs
-	// multiple versions of a package when ranges conflict (so a
-	// version-conflicting graph installs instead of erroring, in isolated mode
-	// too) and resolves direct + transitive git/https deps via the injected
-	// ResolveExotic capability. assembleHoisted's link specs are layout-neutral
-	// — keyed by name@version with resolved edges — so op.link can apply either
-	// the hoisted linker (nests conflicts) or the isolated linker (a symlinked
-	// virtual store keyed by name@version).
+	// Both layouts resolve through the npm-style tree resolver (multiple
+	// versions on conflict; direct + transitive git/https via ResolveExotic).
+	// Its link specs are layout-neutral — keyed by name@version — so op.link
+	// applies either the hoisted or the isolated linker.
 	{
 		resolveExotic, exoticByTarball := op.exoticResolver(ctx, st, existing)
 		resolverDeps := declared

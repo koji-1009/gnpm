@@ -85,11 +85,9 @@ func (op *Operation) fetchOne(
 }
 
 // assembleHoisted expands placements into per-location link specs and
-// lockfile entries (keyed by node_modules path), looking up each
-// placement's fetched metadata in infos. It runs after all fetches finish,
-// walking placements in their deterministic order, so the result does not
-// depend on download completion order. Platform-skipped packages are
-// dropped.
+// lockfile entries (keyed by node_modules path). It walks placements in
+// their deterministic order, so the result is independent of download
+// completion order; platform-skipped packages are dropped.
 func assembleHoisted(
 	placements []treeresolver.Placement,
 	infos map[string]sliceInfo,
@@ -262,7 +260,6 @@ func (f *tarballFetcher) worker() {
 	}
 }
 
-// closeAndWait stops accepting work and waits for in-flight fetches.
 func (f *tarballFetcher) closeAndWait() {
 	close(f.ch)
 	f.wg.Wait()

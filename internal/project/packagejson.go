@@ -299,7 +299,6 @@ func strList(raw any) []string {
 	return out
 }
 
-// strMap coerces a JSON object of string-ish values into map[string]string.
 func strMap(raw any) map[string]string {
 	m, ok := raw.(map[string]any)
 	if !ok {

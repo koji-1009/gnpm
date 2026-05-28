@@ -98,8 +98,6 @@ func (op *Operation) fetchExotic(ctx context.Context, st *store.Store, spec stri
 	}
 }
 
-// splitExotic partitions placements into registry-sourced and
-// exotic-sourced sets.
 func splitExotic(placements []treeresolver.Placement) (reg, exotic []treeresolver.Placement) {
 	for _, p := range placements {
 		if p.Exotic {
@@ -196,8 +194,6 @@ func (op *Operation) materializeDirectExotic(st *store.Store, pkgs []directExoti
 	return locked, nil
 }
 
-// storePackageMeta reads version + dependencies + optionalDependencies +
-// bin from an ingested tarball's package.json in the store.
 func storePackageMeta(st *store.Store, integrity string) (version string, deps, optDeps, bin map[string]string) {
 	m, err := st.ReadManifest(integrity)
 	if err != nil || m == nil {

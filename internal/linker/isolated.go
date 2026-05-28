@@ -61,7 +61,9 @@ func (l IsolatedLinker) Link(projectRoot string, packages []LinkSpec) error {
 		byID[s.ID()] = s
 	}
 
-	// Wire each package's dependencies into its private node_modules.
+	// Wire each package's dependencies into its private node_modules. The
+	// macOS VFS serializes symlink() calls, so a worker pool here only adds
+	// contention (~7% slower at 2k packages); keep it sequential.
 	for _, spec := range packages {
 		ownNM := filepath.Join(l.virtualStoreRoot(projectRoot), safeID(spec.ID()), "node_modules")
 		for depName, depVer := range spec.Dependencies {

@@ -42,6 +42,9 @@ type PackageJSON struct {
 	// OnlyBuiltDependencies is pnpm's build allowlist (unioned with
 	// gnpm.allowBuilds for the build-script gate).
 	OnlyBuiltDependencies []string
+	// NeverBuiltDependencies is pnpm's build denylist — a hard block on
+	// running these packages' install scripts.
+	NeverBuiltDependencies []string
 	// AllowBuilds is package.json#gnpm.allowBuilds.
 	AllowBuilds []string
 	// AuditIgnoreGhsas is package.json#gnpm.auditConfig.ignoreGhsas.
@@ -108,9 +111,12 @@ func FromMap(m map[string]any) *PackageJSON {
 		pf, pn := parseOverrides(pnpmSection["overrides"])
 		p.Overrides = MergeOverrides(p.Overrides, pf)
 		p.NestedOverrides = MergeNestedOverrides(p.NestedOverrides, pn)
+		// pnpm's classic location for the build denylist is pnpm.neverBuiltDependencies.
+		p.NeverBuiltDependencies = append(p.NeverBuiltDependencies, strList(pnpmSection["neverBuiltDependencies"])...)
 	}
 	p.Workspaces = parseWorkspaces(m["workspaces"])
 	p.OnlyBuiltDependencies = strList(m["onlyBuiltDependencies"])
+	p.NeverBuiltDependencies = append(p.NeverBuiltDependencies, strList(m["neverBuiltDependencies"])...)
 	p.PackageManager = stringField(m, "packageManager", "")
 
 	if de, ok := m["devEngines"].(map[string]any); ok {

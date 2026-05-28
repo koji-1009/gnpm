@@ -18,6 +18,10 @@ type Lockfile struct {
 	// not represent, so a pnpm→gnpm→pnpm round trip preserves it instead of
 	// silently dropping it. nil outside pnpm mode or with no prior lockfile.
 	Pnpm *PnpmPassthrough
+	// LinkVersions records importer dependency edges whose resolved "version"
+	// is a link:/file: target rather than a registry version (pnpm records
+	// workspace deps as version: link:<relpath>): importer path → dep → value.
+	LinkVersions map[string]map[string]string
 }
 
 // PnpmPassthrough holds pnpm-lock.yaml sections gnpm reads but does not model

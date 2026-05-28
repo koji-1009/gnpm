@@ -38,6 +38,7 @@ func (op *Operation) runLifecycleScripts(ctx context.Context, pkg *project.Packa
 
 	gate := scripts.BuildPolicy{
 		AllowBuilds:               op.reviewedAllowlist(pkg),
+		NeverBuild:                op.neverBuildList(pkg),
 		StrictDepBuilds:           op.Options.StrictDepBuilds,
 		DangerouslyAllowAllBuilds: op.Options.DangerouslyAllowAllBuilds,
 	}
@@ -47,8 +48,15 @@ func (op *Operation) runLifecycleScripts(ctx context.Context, pkg *project.Packa
 		if len(spec.Scripts) == 0 {
 			continue
 		}
+		triggers := scripts.TriggersFromScripts(spec.Scripts, false, false)
+		// The denylist is a hard block regardless of the script policy — it
+		// applies even under dangerouslyAllowAllBuilds, which bypasses the
+		// allowlist gate below.
+		if triggers.Any() && scripts.MatchesAllowPattern(spec.Name, gate.NeverBuild) {
+			warnings = append(warnings, "skipped install scripts for "+spec.ID()+": in neverBuiltDependencies")
+			continue
+		}
 		if enforce {
-			triggers := scripts.TriggersFromScripts(spec.Scripts, false, false)
 			switch gate.Evaluate(spec.Name, triggers) {
 			case scripts.BuildFail:
 				return warnings, core.Usage("install refused: %s ships install-time build scripts but is not in allowBuilds; add it after review or set dangerouslyAllowAllBuilds", spec.ID())
@@ -90,6 +98,14 @@ func (op *Operation) reviewedAllowlist(pkg *project.PackageJSON) []string {
 	ws := project.ReadPnpmWorkspace(op.ProjectRoot)
 	out = append(out, ws.AllowBuilds...)
 	out = append(out, ws.OnlyBuiltDependencies...)
+	return out
+}
+
+// neverBuildList unions pnpm's neverBuiltDependencies denylist from
+// package.json and pnpm-workspace.yaml.
+func (op *Operation) neverBuildList(pkg *project.PackageJSON) []string {
+	out := append([]string(nil), pkg.NeverBuiltDependencies...)
+	out = append(out, project.ReadPnpmWorkspace(op.ProjectRoot).NeverBuiltDependencies...)
 	return out
 }
 

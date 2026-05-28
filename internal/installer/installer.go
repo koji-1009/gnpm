@@ -303,10 +303,12 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		}
 	}
 
+	importers, linkVersions := op.workspaceImporters(pkg, members)
 	lock := &lockfile.Lockfile{
-		Version:   lockfile.SchemaVersion,
-		Importers: map[string]lockfile.Importer{".": importerOf(pkg)},
-		Packages:  lockPackages,
+		Version:      lockfile.SchemaVersion,
+		Importers:    importers,
+		Packages:     lockPackages,
+		LinkVersions: linkVersions,
 	}
 	if err := op.finish(pkg, lock, engineKey, mode); err != nil {
 		return Report{}, err
@@ -480,7 +482,15 @@ func (op *Operation) link(cfg *npmrc.Config, st *store.Store, specs []linker.Lin
 }
 
 func (op *Operation) linkerKind(cfg *npmrc.Config) linker.Kind {
-	return linker.ParseKind(cfg.GetOr("node-linker", "hoisted"))
+	if v := op.settingValue(cfg, "node-linker"); v != "" {
+		return linker.ParseKind(v)
+	}
+	// No explicit node-linker: match each ecosystem's own default — pnpm
+	// defaults to the isolated layout, npm to the hoisted (flat) one.
+	if project.DetectMode(op.ProjectRoot) == project.ModePnpm {
+		return linker.Isolated
+	}
+	return linker.Hoisted
 }
 
 // --- helpers ----------------------------------------------------------
@@ -670,6 +680,49 @@ func importerOf(pkg *project.PackageJSON) lockfile.Importer {
 		OptionalDependencies: pkg.OptionalDependencies,
 		PeerDependencies:     pkg.PeerDependencies,
 	}
+}
+
+// workspaceImporters builds the lockfile's importer set — the root "." plus one
+// entry per workspace member keyed by its path relative to the project root, so
+// a monorepo's shared lockfile records every member (pnpm's structure) — and the
+// link versions for each importer's workspace dependencies (pnpm records a
+// workspace dep as version: link:<relpath from the importer to the member>).
+func (op *Operation) workspaceImporters(root *project.PackageJSON, members []project.Workspace) (map[string]lockfile.Importer, map[string]map[string]string) {
+	byName := make(map[string]project.Workspace, len(members))
+	for _, m := range members {
+		byName[m.Name] = m
+	}
+	imps := map[string]lockfile.Importer{".": importerOf(root)}
+	links := map[string]map[string]string{}
+	addLinks := func(importerPath, importerDir string, deps ...map[string]string) {
+		for _, dm := range deps {
+			for dep := range dm {
+				m, ok := byName[dep]
+				if !ok {
+					continue
+				}
+				rel, err := filepath.Rel(importerDir, m.RootPath)
+				if err != nil {
+					continue
+				}
+				if links[importerPath] == nil {
+					links[importerPath] = map[string]string{}
+				}
+				links[importerPath][dep] = "link:" + filepath.ToSlash(rel)
+			}
+		}
+	}
+	addLinks(".", op.ProjectRoot, root.Dependencies, root.DevDependencies, root.OptionalDependencies)
+	for _, m := range members {
+		rel, err := filepath.Rel(op.ProjectRoot, m.RootPath)
+		if err != nil || rel == "." {
+			continue
+		}
+		path := filepath.ToSlash(rel)
+		imps[path] = importerOf(m.PackageJSON)
+		addLinks(path, m.RootPath, m.PackageJSON.Dependencies, m.PackageJSON.DevDependencies, m.PackageJSON.OptionalDependencies)
+	}
+	return imps, links
 }
 
 // verifyFrozenNames fails when resolution introduces a name@version not

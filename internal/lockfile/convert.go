@@ -12,14 +12,33 @@ import (
 // distinguishes pnpm snapshots collapses and the conversion is lossless
 // for install purposes.
 func PnpmToLockfile(p *PnpmLockfile, registry string) *Lockfile {
-	importer := Importer{}
-	if root, ok := p.Importers["."]; ok {
-		importer = Importer{
-			Dependencies:         specifierMap(root.Dependencies),
-			DevDependencies:      specifierMap(root.DevDependencies),
-			OptionalDependencies: specifierMap(root.OptionalDependencies),
-			PeerDependencies:     specifierMap(root.PeerDependencies),
+	// Every importer (the root "." and each workspace member, keyed by its
+	// path) is carried through so a monorepo's shared lockfile round-trips.
+	importers := map[string]Importer{}
+	linkVersions := map[string]map[string]string{}
+	for path, imp := range p.Importers {
+		importers[path] = Importer{
+			Dependencies:         specifierMap(imp.Dependencies),
+			DevDependencies:      specifierMap(imp.DevDependencies),
+			OptionalDependencies: specifierMap(imp.OptionalDependencies),
+			PeerDependencies:     specifierMap(imp.PeerDependencies),
 		}
+		capture := func(deps map[string]PnpmDirectDep) {
+			for name, d := range deps {
+				if strings.HasPrefix(d.Version, "link:") || strings.HasPrefix(d.Version, "file:") {
+					if linkVersions[path] == nil {
+						linkVersions[path] = map[string]string{}
+					}
+					linkVersions[path][name] = d.Version
+				}
+			}
+		}
+		capture(imp.Dependencies)
+		capture(imp.DevDependencies)
+		capture(imp.OptionalDependencies)
+	}
+	if len(importers) == 0 {
+		importers["."] = Importer{}
 	}
 
 	// Index snapshots by base name@version, dropping the peer suffix; the
@@ -70,10 +89,11 @@ func PnpmToLockfile(p *PnpmLockfile, registry string) *Lockfile {
 		}
 	}
 	return &Lockfile{
-		Version:   SchemaVersion,
-		Importers: map[string]Importer{".": importer},
-		Packages:  packages,
-		Pnpm:      pnpmPassthrough(p),
+		Version:      SchemaVersion,
+		Importers:    importers,
+		Packages:     packages,
+		Pnpm:         pnpmPassthrough(p),
+		LinkVersions: linkVersions,
 	}
 }
 
@@ -121,12 +141,18 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 	}
 	suffix := peerSuffixes(byName)
 
-	root := lock.Importers["."]
-	importer := PnpmImporter{
-		Dependencies:         directDeps(root.Dependencies, versionByName, suffix),
-		DevDependencies:      directDeps(root.DevDependencies, versionByName, suffix),
-		OptionalDependencies: directDeps(root.OptionalDependencies, versionByName, suffix),
-		PeerDependencies:     directDeps(root.PeerDependencies, versionByName, suffix),
+	importers := map[string]PnpmImporter{}
+	for path, imp := range lock.Importers {
+		links := lock.LinkVersions[path]
+		importers[path] = PnpmImporter{
+			Dependencies:         directDeps(imp.Dependencies, versionByName, suffix, links),
+			DevDependencies:      directDeps(imp.DevDependencies, versionByName, suffix, links),
+			OptionalDependencies: directDeps(imp.OptionalDependencies, versionByName, suffix, links),
+			PeerDependencies:     directDeps(imp.PeerDependencies, versionByName, suffix, links),
+		}
+	}
+	if len(importers) == 0 {
+		importers["."] = PnpmImporter{}
 	}
 
 	packages := map[string]PnpmPackageEntry{}
@@ -166,7 +192,7 @@ func LockfileToPnpm(lock *Lockfile) *PnpmLockfile {
 	out := &PnpmLockfile{
 		LockfileVersion: "9.0",
 		Settings:        map[string]any{"autoInstallPeers": true, "excludeLinksFromLockfile": false},
-		Importers:       map[string]PnpmImporter{".": importer},
+		Importers:       importers,
 		Packages:        packages,
 		Snapshots:       snapshots,
 		Catalogs:        map[string]map[string]string{},
@@ -240,12 +266,18 @@ func specifierMap(deps map[string]PnpmDirectDep) map[string]string {
 	return out
 }
 
-func directDeps(declared map[string]string, versionByName, suffix map[string]string) map[string]PnpmDirectDep {
+func directDeps(declared map[string]string, versionByName, suffix, links map[string]string) map[string]PnpmDirectDep {
 	out := map[string]PnpmDirectDep{}
 	for name, spec := range declared {
+		// A workspace/link/file dep resolves to a link:/file: target, not a
+		// registry version (pnpm records these in the importer too).
+		if lv, ok := links[name]; ok {
+			out[name] = PnpmDirectDep{Specifier: spec, Version: lv}
+			continue
+		}
 		version, ok := versionByName[name]
 		if !ok {
-			continue // workspace link / file: / git: tracked elsewhere
+			continue // git: and other non-link sources are tracked elsewhere
 		}
 		out[name] = PnpmDirectDep{Specifier: spec, Version: version + suffix[name]}
 	}

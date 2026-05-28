@@ -133,6 +133,14 @@ A reviewed allowlist of packages whose install-time scripts may run. See [§6 Li
 }
 ```
 
+#### `neverBuiltDependencies`
+
+- **Type**: list of patterns (`name`, `name*`, `@scope/*`)
+- **Default**: empty
+- **Source**: `pnpm-workspace.yaml#neverBuiltDependencies` or `package.json#pnpm.neverBuiltDependencies` (also accepted at the top level)
+
+pnpm's build **denylist**: a matching package's install-time scripts never run. It is a hard block — it overrides `allowBuilds`/`onlyBuiltDependencies` **and** `dangerouslyAllowAllBuilds`, so a known-bad package stays blocked while builds are otherwise broadly enabled.
+
 #### `strictDepBuilds`
 
 - **Type**: boolean
@@ -147,7 +155,7 @@ A reviewed allowlist of packages whose install-time scripts may run. See [§6 Li
 - **Default**: `false`
 - **Source**: `.npmrc dangerously-allow-all-builds=` or CLI `--allow-scripts=all`
 
-Skips the [build-script gate](#6-lifecycle-scripts) entirely. Every package's `preinstall` / `install` / `postinstall` runs. The flag is named to discourage casual use.
+Runs every package's `preinstall` / `install` / `postinstall`, bypassing the [build-script gate](#6-lifecycle-scripts) — except packages on the `neverBuiltDependencies` denylist, which stay blocked. The flag is named to discourage casual use.
 
 #### `blockExoticSubdeps`
 

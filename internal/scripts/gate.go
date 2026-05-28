@@ -48,18 +48,27 @@ func TriggersFromScripts(scripts map[string]string, hasBindingGyp, hasHooksDir b
 
 // BuildPolicy evaluates the build-script gate (doc/spec.md §6.1).
 type BuildPolicy struct {
-	AllowBuilds               []string
+	AllowBuilds []string
+	// NeverBuild is pnpm's neverBuiltDependencies denylist. It is a hard block:
+	// a matching package's install scripts never run, overriding AllowBuilds and
+	// even DangerouslyAllowAllBuilds, so a known-bad package stays blocked while
+	// builds are otherwise broadly enabled.
+	NeverBuild                []string
 	StrictDepBuilds           bool
 	DangerouslyAllowAllBuilds bool
 }
 
 // Evaluate decides whether packageName's build scripts may run.
 func (p BuildPolicy) Evaluate(packageName string, triggers BuildTriggers) BuildDecision {
-	if p.DangerouslyAllowAllBuilds {
-		return BuildAllow
-	}
 	if !triggers.Any() {
 		return BuildNoTrigger
+	}
+	// The denylist wins over every allow path, including the dangerous one.
+	if MatchesAllowPattern(packageName, p.NeverBuild) {
+		return BuildSkip
+	}
+	if p.DangerouslyAllowAllBuilds {
+		return BuildAllow
 	}
 	if MatchesAllowPattern(packageName, p.AllowBuilds) {
 		return BuildAllow

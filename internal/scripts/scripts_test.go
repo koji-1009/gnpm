@@ -24,6 +24,11 @@ func TestBuildGate(t *testing.T) {
 		{"unreviewed non-strict", BuildPolicy{}, "evil", triggers, BuildSkip},
 		{"unreviewed strict", BuildPolicy{StrictDepBuilds: true}, "evil", triggers, BuildFail},
 		{"dangerous override", BuildPolicy{DangerouslyAllowAllBuilds: true}, "evil", triggers, BuildAllow},
+		{"denylisted", BuildPolicy{NeverBuild: []string{"evil"}}, "evil", triggers, BuildSkip},
+		{"denylist beats allowlist", BuildPolicy{AllowBuilds: []string{"evil"}, NeverBuild: []string{"evil"}}, "evil", triggers, BuildSkip},
+		{"denylist beats dangerous", BuildPolicy{DangerouslyAllowAllBuilds: true, NeverBuild: []string{"evil"}}, "evil", triggers, BuildSkip},
+		{"denylist glob", BuildPolicy{DangerouslyAllowAllBuilds: true, NeverBuild: []string{"ev*"}}, "evil", triggers, BuildSkip},
+		{"denylist no trigger", BuildPolicy{NeverBuild: []string{"evil"}}, "evil", none, BuildNoTrigger},
 	}
 	for _, c := range cases {
 		if got := c.policy.Evaluate(c.pkg, c.triggers); got != c.want {

@@ -118,7 +118,7 @@ func splitExotic(placements []treeresolver.Placement) (reg, exotic []treeresolve
 // produced by a ResolveExotic call that recorded its detail in byTarball;
 // a missing entry is an internal inconsistency, so we fail loudly rather
 // than materialize an empty directory.
-func exoticLinkSpecs(placements []treeresolver.Placement, byTarball map[string]exoticResolved) ([]linker.LinkSpec, map[string]lockfile.LockedPackage, error) {
+func exoticLinkSpecs(placements []treeresolver.Placement, byTarball map[string]exoticResolved, versionAtPath map[string]string) ([]linker.LinkSpec, map[string]lockfile.LockedPackage, error) {
 	var specs []linker.LinkSpec
 	locks := map[string]lockfile.LockedPackage{}
 	for _, p := range placements {
@@ -126,9 +126,23 @@ func exoticLinkSpecs(placements []treeresolver.Placement, byTarball map[string]e
 		if !ok || (r.integrity == "" && r.copyFrom == "") {
 			return nil, nil, core.IOError("no materialization source for exotic dependency %s (%s)", p.Name, p.Tarball)
 		}
+		// Resolve the exotic package's own dependency edges to concrete
+		// versions so the isolated linker can wire them into its private
+		// node_modules (the hoisted linker ignores these and uses the tree).
+		edges := map[string]string{}
+		for d := range r.deps {
+			if v, ok := resolveEdgeVersion(p.Path, d, versionAtPath); ok {
+				edges[d] = v
+			}
+		}
+		for d := range r.optDeps {
+			if v, ok := resolveEdgeVersion(p.Path, d, versionAtPath); ok {
+				edges[d] = v
+			}
+		}
 		specs = append(specs, linker.LinkSpec{
 			Name: p.Name, Version: p.VersionLabel, Path: p.Path, IsDirect: p.IsDirect,
-			Integrity: r.integrity, CopyFrom: r.copyFrom, Bin: r.bin,
+			Integrity: r.integrity, CopyFrom: r.copyFrom, Bin: r.bin, Dependencies: edges,
 		})
 		locks[p.Path] = lockfile.LockedPackage{
 			Name: p.Name, Version: p.VersionLabel, Path: p.Path,

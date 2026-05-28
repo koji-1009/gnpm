@@ -41,6 +41,14 @@ func (l IsolatedLinker) Link(projectRoot string, packages []LinkSpec) error {
 		if _, err := os.Stat(dest); err == nil {
 			return nil
 		}
+		// git/https-sourced packages are copied from the clone/extract dir;
+		// registry ones are materialized from the content-addressable store.
+		if spec.CopyFrom != "" {
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return core.IOError("creating parent for %s", spec.Name).Wrap(err)
+			}
+			return platform.CopyTreeExcluding(spec.CopyFrom, dest, ".git")
+		}
 		return l.Store.Materialize(spec.Integrity, dest)
 	}); err != nil {
 		return err

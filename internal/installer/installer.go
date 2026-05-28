@@ -22,7 +22,6 @@ import (
 	"github.com/koji-1009/gnpm/internal/project"
 	"github.com/koji-1009/gnpm/internal/registry"
 	"github.com/koji-1009/gnpm/internal/regprovider"
-	"github.com/koji-1009/gnpm/internal/resolver"
 	"github.com/koji-1009/gnpm/internal/scripts"
 	"github.com/koji-1009/gnpm/internal/semver"
 	"github.com/koji-1009/gnpm/internal/signature"
@@ -192,18 +191,19 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 	autoInstallPeers := op.autoInstallPeers(cfg)
 
 	var (
-		linkSpecs      []linker.LinkSpec
-		lockPackages   map[string]lockfile.LockedPackage
-		warnings       []string
-		fetchWarnings  []string
-		isolatedExotic []directExoticInstall // direct exotic, materialized post-link (isolated only)
+		linkSpecs    []linker.LinkSpec
+		lockPackages map[string]lockfile.LockedPackage
+		warnings     []string
 	)
-	if op.linkerKind(cfg) == linker.Hoisted {
-		// npm-style tree resolution: allows multiple versions of a package
-		// (hoist the first, nest conflicts), so version-conflicting graphs
-		// install rather than failing. Exotic edges (direct and transitive)
-		// resolve through the injected ResolveExotic capability — git/https
-		// specifiers join the resolver as edges alongside the registry deps.
+	// Both layouts resolve through the npm-style tree resolver: it installs
+	// multiple versions of a package when ranges conflict (so a
+	// version-conflicting graph installs instead of erroring, in isolated mode
+	// too) and resolves direct + transitive git/https deps via the injected
+	// ResolveExotic capability. assembleHoisted's link specs are layout-neutral
+	// — keyed by name@version with resolved edges — so op.link can apply either
+	// the hoisted linker (nests conflicts) or the isolated linker (a symlinked
+	// virtual store keyed by name@version).
+	{
 		resolveExotic, exoticByTarball := op.exoticResolver(ctx, st, existing)
 		resolverDeps := declared
 		if len(directExotic) > 0 {
@@ -260,10 +260,9 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		// Assemble link specs + lockfile entries deterministically from the
 		// fetched metadata (order-independent of download completion).
 		regPlacements, exoticPlacements := splitExotic(placements)
-		linkSpecs, lockPackages = assembleHoisted(regPlacements, fetcher.infos, aliasByPackage)
-		// Exotic instances are materialized by the same hoisted linker: from
-		// the store for https, by copying the clone dir for git.
-		exLinks, exLocks, exErr := exoticLinkSpecs(exoticPlacements, exoticByTarball)
+		versionAtPath := versionsByPath(placements, aliasByPackage)
+		linkSpecs, lockPackages = assembleHoisted(regPlacements, fetcher.infos, aliasByPackage, versionAtPath)
+		exLinks, exLocks, exErr := exoticLinkSpecs(exoticPlacements, exoticByTarball, versionAtPath)
 		if exErr != nil {
 			return Report{}, exErr
 		}
@@ -271,53 +270,7 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 		for k, v := range exLocks {
 			lockPackages[k] = v
 		}
-	} else {
-		// Isolated (pnpm-style) layout uses the single-version pubgrub
-		// solver and symlink farm. The solver has no exotic notion, so only
-		// direct git/https deps are supported here: fetch them, fold their
-		// own deps into the solve, and materialize them at top level after
-		// linking. Transitive exotic deps are not resolved in this mode.
-		for _, logical := range sortedKeys(directExotic) {
-			res, detail, ferr := op.fetchExotic(ctx, st, directExotic[logical], existing)
-			if ferr != nil {
-				return Report{}, ferr
-			}
-			for k, v := range res.Deps {
-				if _, ok := declared[k]; !ok {
-					declared[k] = v
-				}
-			}
-			isolatedExotic = append(isolatedExotic, directExoticInstall{logical: logical, detail: detail, tarball: res.Tarball})
-		}
-		provider.Warmup(declared)
-		solver := resolver.NewSolver(resolver.Request{
-			Dependencies:     declared,
-			Provider:         provider,
-			Overrides:        overrides,
-			NestedOverrides:  nestedOverrides,
-			Preferred:        op.preferred(existing),
-			AutoInstallPeers: autoInstallPeers,
-		})
-		solution, serr := solver.Solve()
-		if serr != nil {
-			return Report{}, serr
-		}
-		warnings = append(warnings, solver.Warnings...)
-		op.prof.mark("resolve (pubgrub)")
-		op.updateTrust(trust, solutionVersions(solution))
-		if op.Options.FrozenLockfile && existing != nil {
-			if err := verifyFrozen(solution, existing, lockfile.ProjectLockfileName(mode)); err != nil {
-				return Report{}, err
-			}
-		}
-		linkSpecs, lockPackages, fetchWarnings, err = op.fetchAndIngest(ctx, solution, provider, declared, aliasByPackage, st, client)
-		if err != nil {
-			return Report{}, err
-		}
-		op.prof.mark("fetch tarballs + ingest")
 	}
-	warnings = append(warnings, fetchWarnings...)
-
 	linkWarnings, err := op.link(cfg, st, linkSpecs)
 	if err != nil {
 		return Report{}, err
@@ -327,15 +280,6 @@ func (op *Operation) Run(ctx context.Context) (Report, error) {
 
 	if err := op.applyLocalLinks(pkg); err != nil {
 		return Report{}, err
-	}
-	// Isolated mode: materialize direct git/https packages as real
-	// top-level directories now that their deps are linked.
-	exoticLocked, err := op.materializeDirectExotic(st, isolatedExotic)
-	if err != nil {
-		return Report{}, err
-	}
-	for _, lp := range exoticLocked {
-		lockPackages[lp.Path] = lp
 	}
 	if err := op.linkWorkspaces(members, linkSpecs); err != nil {
 		return Report{}, err
@@ -526,112 +470,6 @@ func (op *Operation) resolveDistTag(provider *regprovider.Provider, pkg, rng str
 		return resolved
 	}
 	return trimmed
-}
-
-// fetchAndIngest downloads, verifies, and ingests every resolved package
-// (platform-incompatible variants skipped), returning link specs and
-// lockfile entries.
-func (op *Operation) fetchAndIngest(
-	ctx context.Context,
-	solution resolver.Result,
-	provider *regprovider.Provider,
-	declared, aliasByPackage map[string]string,
-	st *store.Store,
-	client *registry.Client,
-) ([]linker.LinkSpec, map[string]lockfile.LockedPackage, []string, error) {
-	type entry struct {
-		name    string
-		version semver.Version
-	}
-	var entries []entry
-	for name, v := range solution.Assignments {
-		entries = append(entries, entry{name, v})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
-
-	var mu sync.Mutex
-	var linkSpecs []linker.LinkSpec
-	lockPackages := map[string]lockfile.LockedPackage{}
-	var warnings []string
-
-	err := core.ForEachLimited(entries, core.HTTPConcurrency, func(e entry) error {
-		slice, err := provider.SliceOf(e.name, e.version)
-		if err != nil {
-			return err
-		}
-		if slice == nil || slice.Tarball == "" || slice.Integrity == "" {
-			return core.NetworkError("no tarball/integrity for %s@%s", e.name, e.version)
-		}
-		// Record the lockfile entry for every resolved package (keeps the
-		// lockfile cross-platform); download + link only this platform's.
-		locked := lockfile.LockedPackage{
-			Name:                 e.name,
-			Version:              e.version.String(),
-			Tarball:              slice.Tarball,
-			Integrity:            slice.Integrity,
-			Dependencies:         slice.Dependencies,
-			OptionalDependencies: slice.OptionalDependencies,
-			PeerDependencies:     slice.PeerDependencies,
-			OS:                   slice.OS,
-			CPU:                  slice.CPU,
-			HasBin:               slice.HasBin,
-			HasInstallScript:     slice.HasInstallScript,
-			Bin:                  slice.Bin,
-			Scripts:              slice.Scripts,
-			Engines:              slice.Engines,
-			Signatures:           lockSignatures(slice.Signatures),
-		}
-		mu.Lock()
-		lockPackages[e.name+"@"+e.version.String()] = locked
-		mu.Unlock()
-		if !platformMatches(slice) {
-			return nil // recorded above; not downloaded or linked on this platform
-		}
-		bytes, err := client.Tarball(ctx, slice.Tarball, slice.Integrity)
-		if err != nil {
-			return err
-		}
-		if w, err := op.verifySignature(ctx, e.name, e.version.String(), slice.Integrity, toSigs(slice.Signatures)); err != nil {
-			return err
-		} else if w != "" {
-			mu.Lock()
-			warnings = append(warnings, w)
-			mu.Unlock()
-		}
-		if _, err := st.IngestTarball(bytes, slice.Integrity); err != nil {
-			return err
-		}
-		// Resolve this package's dependency edges to concrete versions.
-		bundled := map[string]bool{}
-		for _, b := range slice.BundledDeps {
-			bundled[b] = true
-		}
-		depVersions := map[string]string{}
-		for dep := range slice.Dependencies {
-			if bundled[dep] {
-				continue
-			}
-			if v, ok := solution.Assignments[dep]; ok {
-				depVersions[dep] = v.String()
-			}
-		}
-		spec := linker.LinkSpec{
-			Name:         e.name,
-			Version:      e.version.String(),
-			Integrity:    slice.Integrity,
-			Dependencies: depVersions,
-			Bin:          slice.Bin,
-			IsDirect:     declared[e.name] != "",
-			LinkAlias:    aliasByPackage[e.name],
-			Scripts:      slice.Scripts,
-			Engines:      slice.Engines,
-		}
-		mu.Lock()
-		linkSpecs = append(linkSpecs, spec)
-		mu.Unlock()
-		return nil
-	})
-	return linkSpecs, lockPackages, warnings, err
 }
 
 func (op *Operation) link(cfg *npmrc.Config, st *store.Store, specs []linker.LinkSpec) ([]string, error) {
@@ -834,36 +672,6 @@ func importerOf(pkg *project.PackageJSON) lockfile.Importer {
 	}
 }
 
-// preferred seeds the resolver with the lockfile's versions unless this
-// is an update (which bumps to the highest in-range version).
-func (op *Operation) preferred(lock *lockfile.Lockfile) map[string]semver.Version {
-	if op.Options.Update {
-		return map[string]semver.Version{}
-	}
-	return preferredFromLock(lock)
-}
-
-func preferredFromLock(lock *lockfile.Lockfile) map[string]semver.Version {
-	out := map[string]semver.Version{}
-	if lock == nil {
-		return out
-	}
-	for _, p := range lock.Packages {
-		if v, ok := semver.TryParse(p.Version); ok {
-			out[p.Name] = v
-		}
-	}
-	return out
-}
-
-func verifyFrozen(sol resolver.Result, lock *lockfile.Lockfile, name string) error {
-	set := map[string]bool{}
-	for n, v := range sol.Assignments {
-		set[n+"@"+v.String()] = true
-	}
-	return verifyFrozenNames(set, lock, name)
-}
-
 // verifyFrozenNames fails when resolution introduces a name@version not
 // present in the lockfile.
 func verifyFrozenNames(resolved map[string]bool, lock *lockfile.Lockfile, name string) error {
@@ -935,14 +743,6 @@ func placementNVSet(ps []treeresolver.Placement) map[string]bool {
 	out := map[string]bool{}
 	for _, p := range ps {
 		out[p.Name+"@"+placementVersion(p)] = true
-	}
-	return out
-}
-
-func solutionVersions(sol resolver.Result) map[string]string {
-	out := map[string]string{}
-	for n, v := range sol.Assignments {
-		out[n] = v.String()
 	}
 	return out
 }
